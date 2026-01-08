@@ -1,0 +1,2797 @@
+"""
+VERSION OPTIMISÉE de l'analyseur d'architecture racinaire
+Réduction drastique du temps de calcul et de la mémoire utilisée
+
+OPTIMISATIONS PRINCIPALES:
+1. Échantillonnage adaptatif pour les grandes images
+2. Calcul de distance optimisé (KDTree)
+3. Libération agressive de la mémoire
+4. Connexion d'objets accélérée
+5. Option de résolution réduite
+6. Cache des calculs intermédiaires
+"""
+
+PYQT_AVAILABLE = False
+PYQT_VERSION = None
+
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                                QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
+                                QGroupBox, QSpinBox, QFileDialog, QSlider,
+                                QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+                                QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
+    from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
+    PYQT_AVAILABLE = True
+    PYQT_VERSION = 6
+except:
+    try:
+        from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                                    QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
+                                    QGroupBox, QSpinBox, QFileDialog, QSlider,
+                                    QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+                                    QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
+        from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
+        from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
+        PYQT_AVAILABLE = True
+        PYQT_VERSION = 5
+    except:
+        print("This script requires PyQt5 or PyQt6 to run. Neither of these versions was found!")
+
+
+import cv2, gc, math, os, re, sys, traceback
+import networkx as nx
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import tifffile as tiff
+
+from collections import deque
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from pathlib import Path
+
+from widgets import DatasetSelectionWidget
+
+from skimage import morphology, measure, draw, io
+from skimage.morphology import skeletonize, convex_hull_image, closing, disk
+
+from scipy.ndimage import convolve, center_of_mass
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+
+from utils import *
+
+
+def extract_branches_from_graph(G_local):
+    """
+    Décompose le graphe en 'branches' simples à l'intérieur
+    de chaque composante connexe, en couvrant aussi les cycles.
+    Retourne une liste de np.array de shape (N_i, 2) (lignes, colonnes).
+    """
+    branches = []
+    visited_edges = set()  # arêtes déjà parcourues
+    
+    # On travaille composante par composante
+    for comp_nodes in nx.connected_components(G_local):
+        H = G_local.subgraph(comp_nodes).copy()
+        
+        # ---------- Étape 1 : partir des extrémités ----------
+        for node in H.nodes():
+            if H.degree(node) != 1:  # seulement les extrémités
+                continue
+            
+            current = node
+            prev = None
+            path = [current]
+            
+            while True:
+                neighbors = list(H.neighbors(current))
+                # ne prendre que les arêtes non visitées
+                next_candidates = [
+                    n for n in neighbors
+                    if frozenset((current, n)) not in visited_edges
+                ]
+                
+                if not next_candidates:
+                    break
+                
+                nxt = next_candidates[0]
+                visited_edges.add(frozenset((current, nxt)))
+                
+                path.append(nxt)
+                prev, current = current, nxt
+                
+                # arrêt à la prochaine jonction (degré != 2) ou extrémité
+                if H.degree(current) != 2:
+                    break
+            
+            if len(path) > 1:
+                branches.append(np.array(path))
+        
+        # ---------- Étape 2 : traiter les cycles / restes ----------
+        for (u, v) in H.edges():
+            e = frozenset((u, v))
+            if e in visited_edges:
+                continue
+            
+            # on part d'une arête restante et on la "déroule"
+            current = u
+            prev = None
+            path = [current]
+            
+            while True:
+                neighbors = list(H.neighbors(current))
+                next_candidates = [
+                    n for n in neighbors
+                    if frozenset((current, n)) not in visited_edges
+                ]
+                
+                if not next_candidates:
+                    break
+                
+                nxt = next_candidates[0]
+                visited_edges.add(frozenset((current, nxt)))
+                
+                path.append(nxt)
+                prev, current = current, nxt
+                
+                # on s'arrête quand il n'y a plus d'arête nouvelle
+                # (ici typiquement quand on a bouclé le cycle)
+                # pas besoin de condition spéciale : la liste se vide.
+                
+            if len(path) > 1:
+                branches.append(np.array(path))
+    
+    return branches
+
+
+def compute_secondary_angles(main_path, secondary_branches):
+    """Retourne une liste d'angles (en degrés) pour chaque branche secondaire."""
+    abs_angles_deg, angles_deg = [], []
+    
+    if main_path is None or len(main_path) < 2 or len(secondary_branches) == 0:
+        return abs_angles_deg, angles_deg
+    
+    main_path = np.asarray(main_path)
+    
+    # 1) angle de la racine principale
+    main_vec = main_path[-1] - main_path[0]        # [d_row, d_col]
+    main_angle = np.arctan2(main_vec[0], main_vec[1])
+    
+    for br in secondary_branches:
+        br = np.asarray(br)
+        if br.shape[0] < 2:
+            angles_deg.append(np.nan)
+            continue
+        
+        # 2) base = point le plus proche de la racine principale
+        # matrice des distances (N_points_br x N_points_main)
+        dists = cdist(br, main_path)
+        base_idx, _ = np.unravel_index(np.argmin(dists), dists.shape)
+        base = br[base_idx]
+        
+        # 3) extrémité = point le plus éloigné de la base
+        vecs = br - base
+        end_idx = np.argmax(np.linalg.norm(vecs, axis=1))
+        end = br[end_idx]
+        
+        branch_vec = end - base
+        if np.allclose(branch_vec, 0):
+            angles_deg.append(np.nan)
+            continue
+        
+        branch_angle = np.arctan2(branch_vec[0], branch_vec[1])
+        
+        # 4) angle relatif (en degrés), ramené dans [-180, 180]
+        rel = np.degrees(branch_angle - main_angle)
+        rel = (rel + 180) % 360 - 180
+        
+        # souvent on préfère l'angle absolu (0–180°)
+        angles_deg.append(rel)
+        abs_angles_deg.append(abs(rel))
+    
+    return abs_angles_deg, angles_deg
+
+
+def prune_terminal_spurs(skel, min_len_px, protect_mask=None, max_iter=50):
+    """
+    Remove terminal branches shorter than min_len_px from a skeleton.
+    protect_mask: bool array same shape as skel; protected pixels are never removed.
+    """
+    skel = skel.copy().astype(bool)
+    if protect_mask is None:
+        protect_mask = np.zeros_like(skel, dtype=bool)
+    
+    H, W = skel.shape
+    
+    # 8-neighborhood offsets
+    neigh = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    
+    def neighbors(y, x):
+        for dy, dx in neigh:
+            yy, xx = y+dy, x+dx
+            if 0 <= yy < H and 0 <= xx < W and skel[yy, xx]:
+                yield (yy, xx)
+    
+    def degree_map():
+        deg = np.zeros_like(skel, dtype=np.uint8)
+        ys, xs = np.nonzero(skel)
+        for y, x in zip(ys, xs):
+            d = 0
+            for _ in neighbors(y, x):
+                d += 1
+            deg[y, x] = d
+        return deg
+    
+    for _ in range(max_iter):
+        deg = degree_map()
+        endpoints = [(y, x) for (y, x) in zip(*np.nonzero((skel) & (deg == 1)))]
+        
+        removed_any = False
+        
+        for ep in endpoints:
+            y0, x0 = ep
+            if protect_mask[y0, x0]:
+                continue
+            
+            # Walk from endpoint until junction (deg>=3) or until dead end
+            path = [(y0, x0)]
+            prev = None
+            cur = (y0, x0)
+            
+            while True:
+                y, x = cur
+                if deg[y, x] >= 3:
+                    break  # reached a junction
+                
+                nxts = [p for p in neighbors(y, x) if p != prev]
+                if len(nxts) == 0:
+                    break  # isolated / ended
+                if len(nxts) > 1:
+                    # Shouldn't happen often for deg==2, but safe guard
+                    break
+                
+                prev = cur
+                cur = nxts[0]
+                path.append(cur)
+                
+                # If we hit a protected pixel, stop: we don't prune into protected region
+                if protect_mask[cur[0], cur[1]]:
+                    path = None
+                    break
+            
+            if path is None:
+                continue
+            
+            # If terminal segment is shorter than threshold, remove it
+            if len(path) < int(max(1, min_len_px)):
+                for (yy, xx) in path:
+                    if not protect_mask[yy, xx]:
+                        skel[yy, xx] = False
+                removed_any = True
+        
+        if not removed_any:
+            break
+    
+    return skel
+
+
+class RootArchitectureAnalyzer:
+    """Analyseur optimisé pour réduire temps de calcul et mémoire"""
+    
+    def __init__(self, max_image_size=2000, min_branch_length=10.0, max_skeleton_size=100000, connection_sample_rate=0.05, main_path_bias=20.0, grid_rows=3, grid_cols=2, pixels_per_cm=0.0):
+        """
+        Args:
+            max_image_size: Taille max pour redimensionnement (0 = pas de redim)
+            min_branch_length: Taille minimale d'une branche pour être comptabilisée en tant que telle
+            max_skeleton_size: taille maximale du squelette après laquelle un sous-échantillonnage est imposé
+            connection_sample_rate: Taux d'échantillonnage pour connexion (0.01-0.1)
+        """
+        self.logger_callback = None
+        self.max_image_size = max_image_size
+        self.min_branch_length = min_branch_length
+        self.max_skeleton_size = max_skeleton_size
+        self.connection_sample_rate = connection_sample_rate
+        self.scale_factor = 1.0
+        
+        # Attraction vers la racine principale du dernier jour
+        self.main_path_bias = main_path_bias # force de la pénalisation
+        
+        # Nombre de lignes et colonnes grille
+        self.grid_rows = grid_rows
+        self.grid_cols = grid_cols
+        
+        # Conversion pixels -> cm
+        self.pixels_per_cm = pixels_per_cm
+        self.convert_to_cm = self.pixels_per_cm > 0.0
+        
+    def log(self, message):
+        if self.logger_callback:
+            self.logger_callback(message)
+        else:
+            print(message)
+    
+    def resize_if_needed(self, image):
+        """Redimensionne l'image si trop grande"""
+        if self.max_image_size <= 0:
+            self.scale_factor = 1.0
+            return image
+        
+        h, w = image.shape[:2]
+        max_dim = max(h, w)
+        
+        if max_dim > self.max_image_size:
+            self.scale_factor = self.max_image_size / max_dim
+            new_h = int(h * self.scale_factor)
+            new_w = int(w * self.scale_factor)
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            self.log(f"Image resizing: {w}x{h} -> {new_w}x{new_h} (factor: {self.scale_factor:.2f})")
+            return resized
+        
+        self.scale_factor = 1.0
+        return image
+    
+    def preprocess_mask(self, binary_mask, closing_radius=20, min_size=500):
+        """Prétraitement optimisé"""
+        # Fermeture morphologique
+        processed = closing(binary_mask.astype(bool), disk(closing_radius))
+        
+        # Suppression des petits objets
+        processed = morphology.remove_small_objects(processed, min_size=min_size)
+        
+        return processed.astype(np.uint8)
+    
+    def merge_and_connect_objects(self, binary_mask, line_thickness=5, max_iterations=10, max_connection_distance=None):
+        """
+        Version OPTIMISÉE de la connexion d'objets
+        Utilise KDTree pour accélérer la recherche de voisins
+        """
+        current_mask = binary_mask.copy()
+        iteration = 0
+        
+        # distance max par défaut (en pixels)
+        if max_connection_distance is None:
+            # quelque chose de raisonnable pour recoller de petites ruptures
+            max_connection_distance = round(0.05 * min(binary_mask.shape[0], binary_mask.shape[1]))
+            print(f"max_connection_distance = {max_connection_distance}")
+        
+        while iteration < max_iterations:
+            # Étiquetage
+            label_image = measure.label(current_mask)
+            regions = measure.regionprops(label_image)
+            
+            if len(regions) <= 1:
+                self.log(f"Merging complete: {iteration} iterations")
+                break
+            
+            self.log(f"Iteration {iteration}: {len(regions)} objects")
+            
+            # Extraire les contours (plus rapide que tous les coords)
+            region_contours = []
+            for region in regions:
+                # Prendre seulement les points du contour, pas tous les pixels
+                coords = region.coords
+                # Échantillonnage adaptatif
+                sample_size = max(10, int(len(coords) * self.connection_sample_rate))
+                indices = np.random.choice(len(coords), size=min(sample_size, len(coords)), replace=False)
+                region_contours.append(coords[indices].astype(np.float32))
+            
+            # Pour chaque région, trouver la plus proche avec KDTree
+            connections = []
+            for i, coords_i in enumerate(region_contours):
+                if len(coords_i) == 0:
+                    continue
+                
+                min_dist = np.inf
+                best_connection = None
+                
+                for j, coords_j in enumerate(region_contours):
+                    if i >= j or len(coords_j) == 0:
+                        continue
+                    
+                    # KDTree pour recherche rapide du plus proche voisin
+                    tree = cKDTree(coords_j)
+                    distances, indices = tree.query(coords_i, k=1)
+                    min_idx = np.argmin(distances)
+                    
+                    if distances[min_idx] < min_dist:
+                        min_dist = distances[min_idx]
+                        best_connection = (coords_i[min_idx], coords_j[indices[min_idx]])
+                
+                if (best_connection is not None) and (min_dist <= max_connection_distance):
+                    connections.append(best_connection)
+            
+            # Dessiner toutes les connexions
+            for point1, point2 in connections:
+                rr, cc = draw.line(
+                    int(point1[0]), int(point1[1]),
+                    int(point2[0]), int(point2[1])
+                )
+                
+                # Épaissir la ligne
+                for r, c in zip(rr, cc):
+                    rr_thick, cc_thick = draw.disk(
+                        (r, c), radius=line_thickness, 
+                        shape=current_mask.shape
+                    )
+                    current_mask[rr_thick, cc_thick] = True
+            
+            iteration += 1
+            
+            # Libération mémoire
+            del label_image, regions, region_contours, connections
+            gc.collect()
+        
+        return current_mask
+    
+    
+    def _grid_edge_lengths_from_skeleton(self, skeleton_bool, grid_rows, grid_cols):
+        """Compute skeleton length per grid cell (grid_rows x grid_cols).
+        
+        Each skeleton segment is counted once using 8-connectivity edges to the right/bottom.
+        The segment is assigned to a cell using its midpoint.
+        Returns a (grid_rows, grid_cols) float array in *pixel* units.
+        """
+        if grid_rows is None or grid_cols is None:
+            return None
+        try:
+            grid_rows = int(grid_rows)
+            grid_cols = int(grid_cols)
+        except Exception:
+            return None
+        if grid_rows <= 0 or grid_cols <= 0:
+            return None
+        
+        h, w = skeleton_bool.shape[:2]
+        if h == 0 or w == 0:
+            return None
+        
+        cell_h = h / float(grid_rows)
+        cell_w = w / float(grid_cols)
+        
+        out = np.zeros((grid_rows, grid_cols), dtype=np.float64)
+        
+        ys, xs = np.nonzero(skeleton_bool)
+        if ys.size == 0:
+            return out
+        
+        # neighbor offsets (count each edge once)
+        neighbors = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, math.sqrt(2.0)), (1, -1, math.sqrt(2.0))]
+        
+        for y, x in zip(ys.tolist(), xs.tolist()):
+            for dy, dx, seg_len in neighbors:
+                ny = y + dy
+                nx = x + dx
+                if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                    continue
+                if not skeleton_bool[ny, nx]:
+                    continue
+                my = (y + ny) * 0.5
+                mx = (x + nx) * 0.5
+                r = int(my / cell_h) if cell_h > 0 else 0
+                c = int(mx / cell_w) if cell_w > 0 else 0
+                if r < 0: r = 0
+                if c < 0: c = 0
+                if r >= grid_rows: r = grid_rows - 1
+                if c >= grid_cols: c = grid_cols - 1
+                out[r, c] += seg_len
+        
+        return out
+    
+    def skeletonize_and_analyze(self, binary_mask, main_ref_points=None, main_ref_path=None, grid_rows=None, grid_cols=None):
+        """Version optimisée de l'analyse du squelette
+        
+        Args:
+        
+            binary_mask : np.ndarray, Masque binaire de la racine.
+            main_ref_points : (p0, p1) ou None, Deux points (haut, bas) de la racine principale globale.
+            main_ref_path : np.ndarray (N, 2) ou None, Chemin complet de la racine principale du dernier jour ;
+                            utilisé pour définir un couloir spatial autour duquel on contraint la racine principale.
+        """
+        
+        
+        # Squelettisation
+        skeleton = skeletonize(binary_mask.astype(bool))
+        skeleton_points = np.array(np.nonzero(skeleton)).T
+        
+        if len(skeleton_points) == 0:
+            return self._empty_features()
+        
+        
+        # Détection des extrémités (optimisée)
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        neighbor_count = convolve(skeleton.astype(np.uint8), kernel, mode='constant') - skeleton.astype(np.uint8)
+        endpoints = (skeleton & (neighbor_count == 1))
+        endpoint_coords = np.array(np.nonzero(endpoints)).T
+        
+        endpoint_count_raw = int(len(endpoint_coords))
+        root_count_raw = max(0, endpoint_count_raw - 1)
+        
+        # Si trop de points, échantillonner le graphe
+        if len(skeleton_points) > self.max_skeleton_size:
+            self.log(f"Skeleton thick ({len(skeleton_points)} points), sampling...")
+            # Garder tous les endpoints + échantillonnage du reste
+            non_endpoint_mask = skeleton & (~endpoints)
+            non_endpoint_points = np.array(np.nonzero(non_endpoint_mask)).T
+            
+            if len(non_endpoint_points) > 50000:
+                sample_indices = np.random.choice(
+                    len(non_endpoint_points), 
+                    size=5000, 
+                    replace=False
+                )
+                sampled_points = non_endpoint_points[sample_indices]
+                skeleton_points = np.vstack([endpoint_coords, sampled_points])
+            
+            self.log(f"Points reduced to {len(skeleton_points)}")
+        
+        # Création du graphe (optimisée)
+        G = nx.Graph()
+        
+        # Ajouter les nœuds
+        for point in skeleton_points:
+            G.add_node(tuple(point))
+        
+        # Ajouter les arêtes (8-connectivité, optimisée)
+        # Utiliser un KDTree pour trouver les voisins proches
+        tree = cKDTree(skeleton_points)
+        
+        for point in skeleton_points:
+            # Chercher les voisins dans un rayon de sqrt(2) pour 8-connectivité
+            indices = tree.query_ball_point(point, r=1.5)
+            
+            for idx in indices:
+                neighbor = tuple(skeleton_points[idx])
+                node = tuple(point)
+                
+                if neighbor != node and not G.has_edge(node, neighbor):
+                    dist = np.linalg.norm(np.array(neighbor) - np.array(node))
+                    if dist <= 1.5:  # 8-connectivité
+                        G.add_edge(node, neighbor, weight=dist)
+        
+        # ---------- Biais vers la racine de référence (dernier jour) ----------
+        node_dist = None
+        if main_ref_path is not None and len(G.nodes) >= 2:
+            ref = np.asarray(main_ref_path, dtype=float)
+            if ref.ndim == 2 and ref.shape[0] >= 2:
+                node_dist = {}
+                for n in G.nodes:
+                    p = np.array(n, dtype=float)
+                    d = self._distance_point_to_path(p, ref)
+                    node_dist[n] = d
+                
+                # échelle de distance pour normaliser (évite des énormes nombres)
+                max_d = max(node_dist.values()) or 1.0
+                alpha = float(self.main_path_bias)
+                
+                # poids "biaisé" pour chaque arête
+                for u, v, data in G.edges(data=True):
+                    base_len = data.get(
+                        "weight",
+                        np.linalg.norm(np.array(u, dtype=float) - np.array(v, dtype=float))
+                    )
+                    d = (node_dist[u] + node_dist[v]) / 2.0
+                    penalty = 1.0 + alpha * (d / max_d) ** 2
+                    data["biased_weight"] = base_len * penalty
+            else:
+                node_dist = None
+        
+        # Calcul du chemin principal
+        main_path_length = 0.0
+        main_path = []
+        
+        # 1) Essai avec la racine de référence (dernier jour)
+        if (main_ref_points is not None or main_ref_path is not None) and len(G.nodes) >= 2:
+            try:
+                if main_ref_points is not None:
+                    ref_top, ref_bottom = main_ref_points
+                else:
+                    ref_top, ref_bottom = main_ref_path[0], main_ref_path[-1]
+                
+                ref_top = np.asarray(ref_top, dtype=float)
+                ref_bottom = np.asarray(ref_bottom, dtype=float)
+                
+                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
+                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
+                
+                if nx.has_path(G, start_node, end_node):
+                    # si on a un biais (main_ref_path), on l'utilise
+                    weight_attr = "biased_weight" if main_ref_path is not None else "weight"
+                    main_path = nx.shortest_path(G,
+                                                 source=start_node,
+                                                 target=end_node,
+                                                 weight=weight_attr)
+                    
+                    # prolonger jusqu’aux vraies extrémités
+                    # main_path = self._extend_path_to_endpoints(G, main_path)
+                    
+                    # prolonger le chemin le long de l'axe global (ref_top -> ref_bottom)
+                    main_path = self._extend_path_along_axis(G, main_path, ref_top, ref_bottom)
+                    
+                    main_path_length = sum(
+                        np.linalg.norm(np.array(main_path[i], dtype=float) -
+                                       np.array(main_path[i-1], dtype=float))
+                        for i in range(1, len(main_path))
+                    )
+                    G.remove_nodes_from(main_path)
+            except Exception:
+                main_path = []
+                main_path_length = 0.0
+        
+        # 2) Si ça n’a pas marché, on revient au comportement classique :
+        #    extrémités les plus éloignées verticalement, puis fallback "plus long chemin"
+        if main_path_length == 0.0 and len(endpoint_coords) >= 2:
+            highest = max(endpoint_coords, key=lambda x: x[0])
+            lowest = min(endpoint_coords, key=lambda x: x[0])
+            
+            highest_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - highest))
+            lowest_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - lowest))
+            
+            if nx.has_path(G, highest_node, lowest_node):
+                main_path = nx.shortest_path(G, source=highest_node, target=lowest_node, weight="weight")
+                
+                # prolonger jusqu’aux vraies extrémités
+                main_path = self._extend_path_to_endpoints(G, main_path)
+                
+                main_path_length = sum(
+                    np.linalg.norm(np.array(main_path[i]) - np.array(main_path[i-1]))
+                    for i in range(1, len(main_path))
+                )
+                G.remove_nodes_from(main_path)
+        
+        
+        # ============================
+        # Comptage des terminaisons après élagage des petites terminaisons
+        # (protection de main_path pour ne pas élagaguer la racine principale)
+        # ============================
+        
+        endpoint_count_pruned = endpoint_count_raw
+        root_count_pruned = root_count_raw
+        endpoint_coords_pruned = endpoint_coords  # fallback
+        
+        if isinstance(skeleton, np.ndarray) and skeleton.size > 0 and (main_path is not None) and (len(main_path) >= 2):
+            protect_mask = np.zeros_like(skeleton, dtype=bool)
+            for (yy, xx) in main_path:
+                yy = int(yy); xx = int(xx)
+                if 0 <= yy < protect_mask.shape[0] and 0 <= xx < protect_mask.shape[1]:
+                    protect_mask[yy, xx] = True
+            
+            # seuil en pixels de la résolution actuelle (comme pour tes branches)
+            prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
+            
+            skeleton_pruned = prune_terminal_spurs(
+                skeleton,
+                min_len_px=prune_len_px,
+                protect_mask=protect_mask,
+                max_iter=50
+            )
+            
+            # recompute endpoints on pruned skeleton
+            neighbor_count_p = convolve(skeleton_pruned.astype(np.uint8), kernel, mode='constant') - skeleton_pruned.astype(np.uint8)
+            endpoints_p = (skeleton_pruned & (neighbor_count_p == 1))
+            endpoint_coords_pruned = np.array(np.nonzero(endpoints_p)).T
+            
+            endpoint_count_pruned = int(len(endpoint_coords_pruned))
+            root_count_pruned = max(0, endpoint_count_pruned - 1)
+        else:
+            skeleton_pruned = skeleton  # pour éviter NameError si tu veux l'afficher/debug
+        
+        
+        # Extraire les branches sur le graphe restant (sans la racine principale)
+        secondary_branches = extract_branches_from_graph(G)
+        
+        # --- FILTRAGE DES PETITES BRANCHES ---
+        def _branch_length_px(br):
+            br = np.asarray(br, dtype=float)
+            if br.shape[0] < 2:
+                return 0.0
+            
+            diffs = np.diff(br, axis=0)
+            seg_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+            return float(seg_lengths.sum())
+        
+        if self.min_branch_length > 0:
+            # self.min_branch_length est exprimé en "pixels de l'image d'origine".
+            # Comme on a éventuellement redimensionné l'image avec self.scale_factor,
+            # on corrige le seuil pour la résolution actuelle :
+            length_threshold_resized = self.min_branch_length * self.scale_factor
+            filtered_branches = []
+            for br in secondary_branches:
+                if _branch_length_px(br) >= length_threshold_resized:
+                    filtered_branches.append(br)
+            secondary_branches = filtered_branches
+        # --- FIN FILTRAGE ---
+        
+        # Calcul des angles des racines secondaires
+        abs_secondary_angles, secondary_angles = compute_secondary_angles(main_path, secondary_branches)
+        mean_angles, std_angles = np.nan, np.nan
+        mean_abs_angles, std_abs_angles = np.nan, np.nan
+        if len(secondary_angles) > 0:
+            mean_angles = np.mean(secondary_angles)
+            std_angles = np.std(secondary_angles)
+        if len(abs_secondary_angles) > 0:
+            mean_abs_angles = np.mean(abs_secondary_angles)
+            std_abs_angles = np.std(abs_secondary_angles)
+        
+        # Longueur totale des branches secondaires
+        secondary_length = 0.0
+        for branch in secondary_branches:
+            if len(branch) < 2:
+                continue
+            secondary_length += sum(
+                np.linalg.norm(np.array(branch[i]) - np.array(branch[i - 1]))
+                for i in range(1, len(branch))
+            )
+        
+        branch_count = len(secondary_branches)
+        
+        # Root count attach
+        attach_positions = []
+        
+        if main_path is not None and len(main_path) > 1:
+            main_arr = np.asarray(main_path, dtype=float)
+            
+            # longueur cumulée le long du tronc
+            diffs = np.diff(main_arr, axis=0)
+            seg_len = np.linalg.norm(diffs, axis=1)
+            cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+            total_len = cumlen[-1] if len(cumlen) > 0 else 1.0
+            
+            max_attach_dist = 10.0  # distance max en pixels entre branche et tronc
+            
+            for br in secondary_branches:  # ou secondary_level1
+                br_arr = np.asarray(br, dtype=float)
+                # distance de chaque point de la branche au tronc
+                # (si trop lourd, tu peux échantillonner quelques points)
+                dists = np.linalg.norm(
+                    br_arr[:, None, :] - main_arr[None, :, :],
+                    axis=2
+                )
+                flat_idx = np.argmin(dists)  # index aplati sur (n_branch_pts * n_main_pts)
+                i_br, i_main = np.unravel_index(flat_idx, dists.shape)  # (idx point branche, idx point tronc)
+                min_dist = dists[i_br, i_main]
+                
+                if min_dist > max_attach_dist:
+                    continue
+                
+                # position le long du tronc normalisée [0,1] -> on indexe cumlen avec i_main (pas flat_idx)
+                attach_pos = cumlen[i_main] / max(total_len, 1e-6)
+                attach_positions.append(attach_pos)
+        
+        # regrouper les positions proches
+        attach_positions = np.array(sorted(attach_positions))
+        cluster_eps = 0.02  # 2% de la longueur du tronc, par ex.
+        
+        root_count_attach = 0
+        if len(attach_positions) > 0:
+            root_count_attach = 1  # la racine principale
+            current_start = attach_positions[0]
+            for p in attach_positions[1:]:
+                if p - current_start > cluster_eps:
+                    root_count_attach += 1
+                    current_start = p
+        
+        # Autres caractéristiques
+        convex_hull = convex_hull_image(binary_mask)
+        convex_area = np.sum(convex_hull)
+        
+        if np.sum(skeleton) > 0:
+            centroid_y, centroid_x = center_of_mass(skeleton)
+        else:
+            centroid_x, centroid_y = 0, 0
+        
+        # Ajuster les mesures selon le facteur d'échelle
+        scale = 1.0 / self.scale_factor if self.scale_factor > 0 else 1.0
+        
+        # Longueur par cellule de grille
+        grid_lengths_cm = None
+        grid_lengths = self._grid_edge_lengths_from_skeleton(skeleton.astype(bool), self.grid_rows, self.grid_cols)
+        if grid_lengths is not None:
+            grid_lengths = grid_lengths * scale  # same scaling as lengths
+            if self.convert_to_cm and self.pixels_per_cm and self.pixels_per_cm > 0:
+                grid_lengths_cm = grid_lengths / float(self.pixels_per_cm)
+        
+        result = {
+            'main_root_length': main_path_length * scale,
+            'secondary_roots_length': secondary_length * scale,
+            'total_root_length': (main_path_length + secondary_length) * scale,
+            'branch_count': branch_count,
+            'root_count_attach': root_count_attach,
+            'endpoint_count_raw': endpoint_count_raw,
+            'root_count_raw': root_count_raw,
+            'endpoint_count': endpoint_count_pruned,
+            'root_count': root_count_pruned,
+            'convex_area': convex_area * (scale ** 2),
+            'total_area': np.sum(binary_mask) * (scale ** 2),
+            'centroid_x': centroid_x * scale,
+            'centroid_y': centroid_y * scale,
+            'centroid_x_display': centroid_x,
+            'centroid_y_display': centroid_y,
+            'skeleton': skeleton,
+            'main_path': np.array(main_path) if main_path else np.array([]),
+            'endpoints': endpoint_coords,
+            'convex_hull': convex_hull,
+            'secondary_branches': np.array(secondary_branches, dtype=object),
+            'secondary_angles': np.array(secondary_angles, dtype=float),
+            'mean_secondary_angles': mean_angles,
+            'std_secondary_angles': std_angles,
+            'abs_secondary_angles': np.array([abs_secondary_angles], dtype=float),
+            'mean_abs_secondary_angles': mean_abs_angles,
+            'std_abs_secondary_angles': std_abs_angles,
+            'scale':scale,
+            'grid_rows': self.grid_rows,
+            'grid_cols': self.grid_cols,
+            'grid_lengths': grid_lengths,
+            'grid_lengths_cm': grid_lengths_cm,
+            
+            # Debug
+            'endpoints_raw': endpoint_coords,
+            'endpoints_pruned': endpoint_coords_pruned,
+            'skeleton_pruned': skeleton_pruned
+        }
+        
+        if self.convert_to_cm:
+            result['pixels_per_cm'] = self.pixels_per_cm
+            result['main_root_length_cm'] = result['main_root_length'] / self.pixels_per_cm
+            result['secondary_roots_length_cm'] = result['secondary_roots_length'] / self.pixels_per_cm
+            result['total_root_length_cm'] = result['total_root_length'] / self.pixels_per_cm
+            result['convex_hull_cm'] = result['convex_hull'] / (self.pixels_per_cm ** 2)
+            result['convex_area_cm'] = result['convex_area'] / (self.pixels_per_cm ** 2)
+        
+        # Libération mémoire
+        del skeleton_points, G, tree
+        gc.collect()
+        
+        return result
+        
+    def _extend_path_to_endpoints(self, G, path):
+        """
+        Prolonge un chemin existant jusqu'aux vraies extrémités.
+        
+        Au lieu de s'arrêter au premier nœud de degré > 2, on choisit
+        à chaque bifurcation le voisin dont la direction est la plus
+        alignée avec la direction actuelle du chemin (prolongation
+        naturelle de la racine principale).
+        """
+        if not path or len(path) < 2:
+            return path
+        
+        path_deque = deque(path)
+        
+        def extend_side(get_curr, get_prev, append_func):
+            curr = np.array(get_curr(), dtype=float)
+            prev = np.array(get_prev(), dtype=float)
+            
+            while True:
+                # direction actuelle (prev -> curr)
+                v_ref = curr - prev
+                if np.allclose(v_ref, 0):
+                    break
+                v_ref = v_ref / np.linalg.norm(v_ref)
+                
+                # voisins en excluant le nœud précédent
+                neighbors = [n for n in G.neighbors(tuple(curr)) if tuple(n) != tuple(prev)]
+                if not neighbors:
+                    break  # extrémité atteinte
+                
+                # choisir le voisin le mieux aligné avec v_ref
+                best_n = None
+                best_dp = -1.0
+                for n in neighbors:
+                    v = np.array(n, dtype=float) - curr
+                    if np.allclose(v, 0):
+                        continue
+                    v = v / np.linalg.norm(v)
+                    dp = float(np.dot(v_ref, v))  # produit scalaire = cos(angle)
+                    if dp > best_dp:
+                        best_dp = dp
+                        best_n = n
+                
+                # si aucun voisin valable, on arrête
+                if best_n is None:
+                    break
+                
+                # si le meilleur voisin est très "cassé" (optionnel),
+                # on pourrait décider de s'arrêter. Pour l'instant on
+                # le suit quand même.
+                
+                append_func(tuple(best_n))
+                prev, curr = curr, np.array(best_n, dtype=float)
+        
+        # prolonger vers le "haut" du chemin
+        extend_side(
+            get_curr=lambda: path_deque[0],
+            get_prev=lambda: path_deque[1],
+            append_func=path_deque.appendleft
+        )
+        
+        # prolonger vers le "bas" du chemin
+        extend_side(
+            get_curr=lambda: path_deque[-1],
+            get_prev=lambda: path_deque[-2],
+            append_func=path_deque.append
+        )
+        
+        return list(path_deque)
+    
+    def _extend_path_along_axis(self, G, path, top, bottom):
+        """
+        Étend un chemin 'path' le long de l'axe global (top -> bottom)
+        jusqu'aux extrémités atteignables dans le graphe.
+        
+        On utilise l’axe global (top -> bottom) plutôt que la seule
+        direction locale pour rester collé au tronc principal même
+        dans une zone très ramifiée.
+        """
+        if not path or len(path) < 2:
+            return path
+        
+        path_nodes = list(path)
+        
+        top = np.asarray(top, dtype=float)
+        bottom = np.asarray(bottom, dtype=float)
+        axis = bottom - top
+        if np.allclose(axis, 0):
+            return path_nodes
+        axis = axis / np.linalg.norm(axis)
+        
+        def extend_from_end(idx_curr, idx_prev, direction_sign):
+            nonlocal path_nodes
+            prev = np.array(path_nodes[idx_prev], dtype=float)
+            curr = np.array(path_nodes[idx_curr], dtype=float)
+            dir_ref = direction_sign * axis
+            
+            while True:
+                curr_t = tuple(curr.astype(int))
+                prev_t = tuple(prev.astype(int))
+                
+                # voisins sauf le nœud précédent
+                neighbors = [n for n in G.neighbors(curr_t) if n != prev_t]
+                if not neighbors:
+                    break  # extrémité atteinte
+                
+                best_n = None
+                best_dp = -1e9
+                for n in neighbors:
+                    v = np.array(n, dtype=float) - curr
+                    if np.allclose(v, 0):
+                        continue
+                    v = v / np.linalg.norm(v)
+                    dp = float(np.dot(v, dir_ref))  # alignement avec l'axe global
+                    if dp > best_dp:
+                        best_dp = dp
+                        best_n = n
+                
+                if best_n is None:
+                    break
+                
+                if direction_sign < 0:
+                    # on prolonge vers le haut : on ajoute au début
+                    path_nodes.insert(0, best_n)
+                    idx_curr, idx_prev = 0, 1
+                else:
+                    # on prolonge vers le bas : on ajoute à la fin
+                    path_nodes.append(best_n)
+                    idx_curr, idx_prev = len(path_nodes) - 1, len(path_nodes) - 2
+                
+                prev = curr
+                curr = np.array(best_n, dtype=float)
+        
+        # prolonger vers le "haut" du chemin (direction -axis)
+        extend_from_end(0, 1, -1.0)
+        # prolonger vers le "bas" du chemin (direction +axis)
+        extend_from_end(len(path_nodes) - 1, len(path_nodes) - 2, +1.0)
+        
+        return path_nodes
+    
+    def _distance_point_to_path(self, point, path_array):
+        """Distance euclidienne min entre un point (2,) et un chemin (N,2)."""
+        diffs = path_array - point
+        return float(np.min(np.linalg.norm(diffs, axis=1)))
+    
+    def _empty_features(self):
+        """Features vides"""
+        return {
+            'main_root_length': 0.0,
+            'secondary_roots_length': 0.0,
+            'total_root_length': 0.0,
+            'branch_count': 0,
+            'root_count_attach': 0,
+            'endpoint_count_raw': 0,
+            'root_count_raw': 0,
+            'endpoint_count': 0,
+            'root_count': 0,
+            'convex_area': 0,
+            'total_area': 0,
+            'centroid_x': 0.0,
+            'centroid_y': 0.0,
+            'centroid_x_display': 0.0,
+            'centroid_y_display': 0.0,
+            'skeleton': np.array([]),
+            'main_path': np.array([]),
+            'endpoints': np.array([]),
+            'convex_hull': np.array([]),
+            'secondary_branches': np.array([], dtype=object),
+            'secondary_angles': np.array([], dtype=float),
+            'mean_secondary_angles': 0.0,
+            'std_secondary_angles': 0.0,
+            'abs_secondary_angles': np.array([], dtype=float),
+            'mean_abs_secondary_angles': 0.0,
+            'std_abs_secondary_angles': 0.0,
+            'scale':1.0,
+            'grid_rows': 0,
+            'grid_cols': 0,
+            # Debug
+            'endpoints_raw': np.array([]),
+            'endpoints_pruned': np.array([]),
+            'skeleton_pruned': np.array([])
+        }
+
+class RootArchitectureWorker(QThread):
+    """Worker optimisé pour l'analyse"""
+    
+    progress = pyqtSignal(int, str)
+    day_analyzed = pyqtSignal(int, dict, np.ndarray, np.ndarray)
+    finished = pyqtSignal(pd.DataFrame)
+    error = pyqtSignal(str)
+    
+    def __init__(self, mask_files, params):
+        super().__init__()
+        self.mask_files = sorted(mask_files)
+        self.params = params
+        
+        # Créer l'analyseur avec les paramètres d'optimisation
+        self.analyzer = RootArchitectureAnalyzer(
+            max_image_size=params.get('max_image_size', 2000),
+            min_branch_length=params.get('min_branch_length', 10.0),
+            max_skeleton_size=params.get('min_sampling_threshold', 100000),
+            connection_sample_rate=params.get('connection_sample_rate', 0.05),
+            main_path_bias=params.get('main_path_bias', 20.0),
+            grid_rows=params.get('grid_rows', 3),
+            grid_cols=params.get('grid_cols', 2),
+            pixels_per_cm=params.get('pixels_per_cm', 0.0)
+        )
+        self.analyzer.logger_callback = self.log_message
+        
+    def log_message(self, message):
+        print(message)
+    
+    def run(self):
+        """Exécution optimisée de l'analyse (avec racine principale globale)"""
+        try:
+            # ----------------------------
+            # 1) Pré-traitement de tous les jours
+            # ----------------------------
+            preprocessed = []
+            previous_merged = None
+            total = len(self.mask_files)
+            
+            for idx, mask_file in enumerate(self.mask_files):
+                filename = Path(mask_file).stem
+                # 0 -> 50% pendant le pré-traitement. Le +1 permet d'atteindre 50% sur le dernier item.
+                preprocess_progress = int(((idx + 1) / max(total, 1)) * 50)
+                preprocess_progress = max(0, min(50, preprocess_progress))
+                self.progress.emit(preprocess_progress, f"Preprocessing: {filename}")
+                
+                # Charger l'image
+                if mask_file.endswith((os.extsep + 'tif', os.extsep + 'tiff')):
+                    mask = tiff.imread(mask_file)
+                    if mask.ndim > 2:
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                else:
+                    mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
+                    if mask is None:
+                        raise ValueError(f"Could not read image: {mask_file}")
+                
+                # Redimensionner si nécessaire
+                mask = self.analyzer.resize_if_needed(mask)
+                
+                # Binarisation
+                binary_mask = (mask > 0).astype(np.uint8)
+                original_mask = binary_mask.copy()
+                
+                # Métadonnées
+                day_match = re.search(r"_J(\d+)_", filename)
+                day = int(day_match.group(1)) if day_match else idx
+                modality = filename.split("_")[0] if "_" in filename else "unknown"
+                
+                # Fusion temporelle
+                if previous_merged is not None and self.params['temporal_merge']:
+                    # Redimensionner previous_merged si nécessaire
+                    if previous_merged.shape != binary_mask.shape:
+                        previous_merged = cv2.resize(
+                            previous_merged,
+                            (binary_mask.shape[1], binary_mask.shape[0]),
+                            interpolation=cv2.INTER_NEAREST
+                        )
+                    merged_mask = np.logical_or(binary_mask, previous_merged).astype(np.uint8)
+                else:
+                    merged_mask = binary_mask.copy()
+                
+                # Prétraitement morphologique
+                processed = self.analyzer.preprocess_mask(
+                    merged_mask,
+                    closing_radius=self.params['closing_radius'],
+                    min_size=self.params['min_object_size']
+                )
+                
+                # Connexion des objets (optionnel)
+                if self.params['connect_objects']:
+                    processed = self.analyzer.merge_and_connect_objects(
+                        processed,
+                        line_thickness=self.params['line_thickness'],
+                        max_iterations=self.params.get('max_connect_iterations', 10),
+                        max_connection_distance=self.params.get('max_connection_dst', None)
+                    )
+                
+                preprocessed.append({
+                    "filename": filename,
+                    "day": day,
+                    "modality": modality,
+                    "original_mask": original_mask,
+                    "processed": processed
+                })
+                
+                # Sauvegarde pour la fusion temporelle
+                previous_merged = processed.copy()
+                
+                # Libération mémoire partielle
+                del mask, binary_mask, merged_mask
+            
+            
+            if not preprocessed:
+                self.finished.emit(pd.DataFrame())
+                return
+            
+            # on trie au cas où par numéro de jour
+            preprocessed.sort(key=lambda d: d["day"])
+            
+            # ----------------------------
+            # 2) Récupérer la racine principale du dernier jour
+            # ----------------------------
+            last_item = preprocessed[-1]
+            last_day = last_item["day"]
+            
+            # Analyse (50 -> 100%)
+            # On compte : 1 step par jour analysé + éventuellement 1 step de "re-align".
+            analysis_steps = max(len(preprocessed), 1)
+            did_realign = False
+            analyzed_done = 0
+            
+            # Analyse du dernier jour (sert de référence)
+            self.progress.emit(50, f"Analysis: {last_item['filename']}")
+            last_features = self.analyzer.skeletonize_and_analyze(
+                last_item["processed"],
+                grid_rows=self.params.get("grid_rows", None),
+                grid_cols=self.params.get("grid_cols", None)
+            )
+            analyzed_done += 1
+            self.progress.emit(
+                50 + int((analyzed_done / analysis_steps) * 50),
+                f"Analysis: {last_item['filename']}"
+            )
+            
+            ref_path = last_features.get("main_path", None)
+            # Si on n'a pas de chemin valable, on fera sans continuité
+            if not (isinstance(ref_path, np.ndarray) and len(ref_path) >= 2):
+                ref_path = None
+            
+            features_by_day = {last_day: last_features}
+            
+            # ----------------------------
+            # 3) Remonter dans le temps : J(N-1) -> J0
+            # ----------------------------
+            for item in reversed(preprocessed[:-1]):
+                day = item["day"]
+                filename = item["filename"]
+                
+                # 50 -> 100% réparti sur tous les jours analysés
+                self.progress.emit(
+                    50 + int((analyzed_done / analysis_steps) * 50),
+                    f"Analysis: {filename}"
+                )
+                
+                features = self.analyzer.skeletonize_and_analyze(
+                    item["processed"],
+                    main_ref_path=ref_path,  # on force à suivre le jour suivant
+                    grid_rows=self.params.get("grid_rows", None),
+                    grid_cols=self.params.get("grid_cols", None)
+                )
+                
+                analyzed_done += 1
+                self.progress.emit(
+                    50 + int((analyzed_done / analysis_steps) * 50),
+                    f"Analysis: {filename}"
+                )
+                
+                features_by_day[day] = features
+                
+                # Met à jour la référence pour le jour d'avant
+                mp = features.get("main_path", None)
+                if isinstance(mp, np.ndarray) and len(mp) >= 2:
+                    ref_path = mp
+            
+            # ----------------------------
+            # 3bis) Recalage du DERNIER jour sur le jour précédent
+            # ----------------------------
+            days_sorted = sorted(features_by_day.keys())
+            if len(days_sorted) >= 2:
+                last_day = days_sorted[-1]
+                prev_last_day = days_sorted[-2]
+                
+                prev_path = features_by_day[prev_last_day].get("main_path", None)
+                if isinstance(prev_path, np.ndarray) and len(prev_path) >= 2:
+                    # Retrouver le masque traité du dernier jour
+                    last_item = next(d for d in preprocessed if d["day"] == last_day)
+                    
+                    # Recalcule J(last) en le forçant à suivre J(last-1)
+                    did_realign = True
+                    # On réserve 1 "step" implicite pour le recalage : on clamp à 99% ici.
+                    self.progress.emit(
+                        max(50, min(99, 50 + int((analyzed_done / analysis_steps) * 50))),
+                        f"Re-aligning last day (J{last_day}) to previous main root"
+                    )
+                    corrected_last = self.analyzer.skeletonize_and_analyze(
+                        last_item["processed"],
+                        main_ref_path=prev_path,
+                        grid_rows=self.params.get("grid_rows", None),
+                        grid_cols=self.params.get("grid_cols", None)
+                    )
+                    
+                    features_by_day[last_day] = corrected_last
+            
+            # ----------------------------
+            # 4) Construction du DataFrame + signaux Qt
+            # ----------------------------
+            results = []
+            for item in preprocessed:
+                day = item["day"]
+                filename = item["filename"]
+                modality = item["modality"]
+                features = features_by_day[day]
+                
+                # Résumé tabulaire (sans les gros tableaux numpy)
+                row = {
+                    "image": filename,
+                    "day": day,
+                    "modality": modality,
+                    **{k: v for k, v in features.items()
+                       if not isinstance(v, np.ndarray)}
+                }
+                results.append(row)
+                
+                # --- Grid lengths: flatten to scalar columns for CSV/DataFrame ---
+                gl = features.get("grid_lengths", None)
+                if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
+                    for i in range(gl.shape[0]):
+                        for j in range(gl.shape[1]):
+                            # Notation demandée: C{i,j} (1-indexed)
+                            row[f"C{i+1},{j+1}"] = float(gl[i, j])
+                
+                gl_cm = features.get("grid_lengths_cm", None)
+                if isinstance(gl_cm, np.ndarray) and gl_cm.ndim == 2 and gl_cm.size > 0:
+                    for i in range(gl_cm.shape[0]):
+                        for j in range(gl_cm.shape[1]):
+                            row[f"C{i+1},{j+1}_cm"] = float(gl_cm[i, j])
+                
+                results.append(row)
+                
+                # Émission pour l’onglet Visualisation
+                self.day_analyzed.emit(
+                    day,
+                    features,
+                    item["original_mask"],
+                    item["processed"]
+                )
+                
+                # libération mémoire
+                item["processed"] = None
+                item["original_mask"] = None
+            
+            df = pd.DataFrame(results)
+            self.finished.emit(df)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.error.emit(
+                f"Error during root architecture analysis:\n{e}\n\n{tb}"
+            )
+
+
+class RootVisualizationWidget(QWidget):
+    """Widget de visualisation du système racinaire"""
+    
+    def __init__(self, n_max_rows_grid=12, n_max_cols_grid=9):
+        super().__init__()
+        self.current_day_data = {}
+        self.n_max_rows_grid = n_max_rows_grid
+        self.n_max_cols_grid = n_max_cols_grid
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Canvas matplotlib
+        self.figure = Figure(figsize=(12, 10))
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+        
+        # Contrôles de visualisation
+        controls = QHBoxLayout()
+        
+        self.show_skeleton_check = QCheckBox("Skeleton")
+        self.show_skeleton_check.setChecked(True)
+        self.show_skeleton_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_skeleton_check)
+        
+        self.show_main_path_check = QCheckBox("Main root")
+        self.show_main_path_check.setChecked(True)
+        self.show_main_path_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_main_path_check)
+        
+        self.show_secondary_check = QCheckBox("Secondary roots")
+        self.show_secondary_check.setChecked(True)
+        self.show_secondary_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_secondary_check)
+        
+        self.show_endpoints_check = QCheckBox("End points")
+        self.show_endpoints_check.setChecked(True)
+        self.show_endpoints_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_endpoints_check)
+        
+        self.show_convex_check = QCheckBox("Convex hull")
+        self.show_convex_check.setChecked(True)
+        self.show_convex_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_convex_check)
+        
+        self.show_grid_check = QCheckBox("Grid")
+        self.show_grid_check.setChecked(False)
+        self.show_grid_check.stateChanged.connect(self.update_visualization)
+        controls.addWidget(self.show_grid_check)
+        
+        self.n_rows_grid_label = QLabel("X")
+        controls.addWidget(self.n_rows_grid_label)
+        self.n_rows_grid_combo = QComboBox()
+        self.n_rows_grid_combo.addItems([str(i) for i in range(2, self.n_max_rows_grid+1)])
+        self.n_rows_grid_combo.setCurrentIndex(1)
+        self.n_rows_grid_combo.currentIndexChanged.connect(self.update_visualization)
+        controls.addWidget(self.n_rows_grid_combo)
+        
+        self.n_cols_grid_label = QLabel("Y")
+        controls.addWidget(self.n_cols_grid_label)
+        self.n_cols_grid_combo = QComboBox()
+        self.n_cols_grid_combo.addItems([str(i) for i in range(2, self.n_max_cols_grid+1)])
+        self.n_cols_grid_combo.setCurrentIndex(0)
+        self.n_cols_grid_combo.currentIndexChanged.connect(self.update_visualization)
+        controls.addWidget(self.n_cols_grid_combo)
+        
+        controls.addStretch()
+        layout.addLayout(controls)
+        
+        self.setLayout(layout)
+    
+    def set_day_data(self, day, features, original, merged, dataset):
+        """Définir les données d'un jour spécifique"""
+        self.current_day_data = {
+            'day': day,
+            'features': features,
+            'original': original,
+            'merged': merged,
+            'dataset':dataset
+        }
+        self.update_visualization()
+    
+    def update_visualization(self):
+        """Mise à jour de la visualisation"""
+        if not self.current_day_data:
+            return
+        
+        self.figure.clear()
+        
+        features = self.current_day_data['features']
+        merged = self.current_day_data['merged']
+        day = self.current_day_data['day']
+        dataset = self.current_day_data['dataset']
+        
+        # Création des sous-graphiques
+        ax1 = self.figure.add_subplot(2, 2, 1)
+        ax2 = self.figure.add_subplot(2, 2, 2)
+        ax3 = self.figure.add_subplot(2, 2, 3)
+        ax4 = self.figure.add_subplot(2, 2, 4)
+        
+        # 1. Masque original
+        ax1.imshow(self.current_day_data['original'], cmap='gray')
+        ax1.set_title(f'Original mask - Day {day}')
+        ax1.axis('off')
+        
+        # 2. Masque fusionné/traité
+        ax2.imshow(merged, cmap='gray')
+        ax2.set_title('Fused and treated mask')
+        ax2.axis('off')
+        
+        # 3. Analyse du squelette
+        if len(features.get('skeleton', [])) > 0:
+            ax3.imshow(features['skeleton'], cmap='gray')
+            
+            if self.show_convex_check.isChecked() and len(features.get('convex_hull', [])) > 0:
+                ax3.imshow(features['convex_hull'], cmap='Reds', alpha=0.2)
+            
+            if self.show_main_path_check.isChecked() and len(features.get('main_path', [])) > 0:
+                main_path = features['main_path']
+                ax3.plot(main_path[:, 1], main_path[:, 0], 'r-', linewidth=2, label='Main root')
+            
+            # Racines secondaires
+            if self.show_secondary_check.isChecked() and len(features.get('secondary_branches', [])) > 0:
+                branches = features['secondary_branches']
+                first = True
+                for br in np.atleast_1d(branches):
+                    br = np.asarray(br)
+                    if br.shape[0] < 2:
+                        continue
+                    if first:
+                        ax3.plot(
+                            br[:, 1], br[:, 0],
+                            '-', linewidth=1.0, color='orange',
+                            label='Secondary roots'
+                        )
+                        first = False
+                    else:
+                        ax3.plot(
+                            br[:, 1], br[:, 0],
+                            '-', linewidth=1.0, color='orange'
+                        )
+            
+            if self.show_endpoints_check.isChecked() and len(features.get('endpoints', [])) > 0:
+                endpoints = features['endpoints']
+                ax3.scatter(endpoints[:, 1], endpoints[:, 0], c='yellow', s=30, 
+                          marker='o', edgecolors='red', linewidths=1, label='End points', zorder=5)
+            
+            if features['centroid_x'] > 0:
+                ax3.scatter(features['centroid_x_display'], features['centroid_y_display'], 
+                          c='lime', s=100, marker='x', linewidths=2, label='Barycenter', zorder=5)
+            
+            if self.show_grid_check.isChecked():
+                n_rows = int(self.n_rows_grid_combo.currentText())
+                n_cols = int(self.n_cols_grid_combo.currentText())
+                x_lim, y_lim = ax3.get_xlim(), ax3.get_ylim()
+                x_size = x_lim[1] - x_lim[0]
+                y_size = y_lim[1] - y_lim[0]
+                v_lines = np.array([round(x_lim[0] + x_size / n_cols * i) for i in range(1, n_cols)], dtype='int32')
+                h_lines = np.array([round(y_lim[0] + y_size / n_rows * j) for j in range(1, n_rows)], dtype='int32')
+                ax3.vlines(v_lines, ymin=y_lim[0], ymax=y_lim[1], color='w', linestyles='dashed', linewidth=0.75)
+                ax3.hlines(h_lines, xmin=x_lim[0], xmax=x_lim[1], color='w', linestyles='dashed', linewidth=0.75)
+            
+            ax3.set_title('Skeleton analysis')
+            ax3.axis('off')
+            ax3.legend(loc='upper right', fontsize=8)
+        
+        # 4. Statistiques
+        ax4.axis('off')
+        stats_text = f"""
+        Day {day}
+        Dataset: {dataset}
+        
+        Main root length: {features['main_root_length']:.1f} px
+        Secondary roots length: {features['secondary_roots_length']:.1f} px
+        Total length: {features['total_root_length']:.1f} px
+        
+        Number of branches: {features['branch_count']}
+        Number of end points without pruning: {features['endpoint_count_raw']}
+        Number of roots without pruning: {features['root_count_raw']}
+        Number of end points: {features['endpoint_count']}
+        Number of roots: {features['root_count']}
+        Root count attach: {features['root_count_attach']}
+        
+        Mean secondary angles: {features['mean_secondary_angles']:.2f}
+        Standard deviation secondary angles: {features['std_secondary_angles']:.2f}
+        Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}
+        Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}
+        
+        Total area: {features['total_area']:.0f} px²
+        Convex area: {features['convex_area']:.0f} px²
+        
+        Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
+        """
+        
+        # --- Grid: show summary + heatmap without overlapping the text ---
+        gl = features.get("grid_lengths", None)
+        if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
+            try:
+                stats_text += f"""
+        Grid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px
+        """
+            except Exception:
+                pass
+        
+        # Split the stats area into: top text + bottom heatmap
+        text_ax = ax4.inset_axes([0.02, 0.33, 0.96, 0.65])
+        text_ax.axis('off')
+        text_ax.text(
+            0.0, 1.0, stats_text,
+            transform=text_ax.transAxes,
+            fontsize=9, verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        )
+        
+        if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
+            try:
+                heat_ax = ax4.inset_axes([0.10, 0.05, 0.85, 0.23])
+                heat_ax.imshow(gl, aspect='auto', origin='upper')
+                heat_ax.set_title("Grid length heatmap (px)", fontsize=8)
+                heat_ax.set_xticks(range(gl.shape[1]))
+                heat_ax.set_yticks(range(gl.shape[0]))
+                heat_ax.tick_params(axis='both', which='major', labelsize=7)
+                heat_ax.set_xlabel("col", fontsize=7)
+                heat_ax.set_ylabel("row", fontsize=7)
+            except Exception:
+                pass
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+
+class RootHeatmapWidget(QWidget):
+    """Affiche la heatmap des longueurs par cellule de grille (grid_lengths / grid_lengths_cm)."""
+    
+    def __init__(self):
+        super().__init__()
+        self.current = None  # dict(day, features, dataset)
+        
+        layout = QVBoxLayout(self)
+        
+        # Controls
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("Unité:"))
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems(["px", "cm"])
+        self.unit_combo.setCurrentIndex(0)
+        self.unit_combo.currentIndexChanged.connect(self.update_view)
+        ctrl.addWidget(self.unit_combo)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+        
+        # Figure
+        self.figure = Figure(figsize=(6, 4))
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+        
+        self.setLayout(layout)
+    
+    def set_day_data(self, day, features, dataset=None):
+        self.current = {"day": day, "features": features, "dataset": dataset}
+        self.update_view()
+    
+    def update_view(self):
+        if not self.current:
+            return
+        features = self.current["features"]
+        day = self.current["day"]
+        dataset = self.current.get("dataset", "")
+        
+        use_cm = (self.unit_combo.currentText().lower() == "cm")
+        key = "grid_lengths_cm" if use_cm else "grid_lengths"
+        gl = features.get(key, None)
+        
+        self.figure.clear()
+        ax = self.figure.add_subplot(1, 1, 1)
+        
+        if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
+            ax.imshow(gl, aspect="auto", origin="upper")
+            ax.set_title(f"Grid length heatmap ({'cm' if use_cm else 'px'}) - J{day} - {dataset}")
+            ax.set_xticks(range(gl.shape[1]))
+            ax.set_yticks(range(gl.shape[0]))
+            ax.set_xlabel("col")
+            ax.set_ylabel("row")
+            # Annoter chaque cellule (lisible tant que petite grille)
+            try:
+                if gl.shape[0] <= 12 and gl.shape[1] <= 12:
+                    for i in range(gl.shape[0]):
+                        for j in range(gl.shape[1]):
+                            ax.text(j, i, f"{gl[i, j]:.1f}", ha="center", va="center", fontsize=7)
+            except Exception:
+                pass
+        else:
+            ax.text(0.5, 0.5, "Aucune donnée de grille disponible pour ce jour.",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+class RootArchitectureWindow(QMainWindow):
+    """Fenêtre optimisée avec paramètres de performance"""
+    
+    def __init__(self, parent=None, init_params=None, datasets=None, current_dir=None, output_dir=None):
+        super().__init__(parent)
+        self.current_df = None
+        self.daily_data = {}
+        self.worker = None
+        
+        self.default_params  =  { 'closing_radius': 5,
+                                  'closing_shape': cv2.MORPH_RECT,
+                                  'min_branch_length': 10.0,
+                                  'min_object_size': 500,
+                                  'max_connection_dst': 80,
+                                  'line_thickness': 5,
+                                  'temporal_merge': True,
+                                  'connect_objects': True,
+                                  'main_path_bias': 20,
+                                  'grid_rows': 3,
+                                  'grid_cols': 2
+                                }
+        self.init_params = init_params
+        self.datasets = datasets
+        self.datasets_list = ["No selection"]
+        self.current_dataset = None
+        self.current_directory = current_dir
+        self.output_directory = output_dir
+        self.image_extension_list = tuple([os.extsep + ext for ext in ['png', 'jpg', 'tif', 'tiff']])
+        
+        self.n_max_rows_grid = 12
+        self.n_max_cols_grid = 9
+        
+        # Default closing parameters
+        self.kernel_shape_dict = {"Rectangle":cv2.MORPH_RECT, "Cross":cv2.MORPH_CROSS, "Ellipse":cv2.MORPH_ELLIPSE}
+        self.default_kernel_shape_index = 0
+        self.default_kernel_shape_name = list(self.kernel_shape_dict.keys())[self.default_kernel_shape_index]
+        
+        self.kernel_shape_index = self.default_kernel_shape_index
+        self.kernel_shape = self.default_kernel_shape_name
+        self.kernel_shape_value = self.kernel_shape_dict[self.default_kernel_shape_name]
+        
+        self.init_parameters()
+        self.init_ui()
+    
+    def init_parameters(self):
+        if self.init_params is None:
+            self.init_params =  self.default_params
+        else:
+            for param_key, key_value in self.default_params.items():
+                self.init_params[param_key] = self.init_params.get(param_key, key_value)
+        
+        self.kernel_shape_value = self.init_params['closing_shape']
+        for idx_key, key_value in enumerate(self.kernel_shape_dict.items()):
+            if key_value == self.kernel_shape_value:
+                self.kernel_shape_index = idx_key
+                self.kernel_shape = list(self.kernel_shape_dict.keys())[idx_key]
+                break
+        
+        if self.datasets:
+            self.datasets_list += list(self.datasets.keys())
+        
+        # Dataset selector defaults
+        self._show_only_segmented = True
+        # Ajoute un attribut .selected si absent (pour le widget)
+        if self.datasets:
+            for _name, _ds in self.datasets.items():
+                if not hasattr(_ds, 'selected'):
+                    try:
+                        _ds.selected = self._dataset_has_root_masks(_ds)
+                    except Exception:
+                        _ds.selected = False
+        # Batch state
+        self._batch_active = False
+        self._batch_all_results = []
+        self._batch_queue = []
+        self._batch_index = 0
+        self._batch_current = None
+        self._batch_running = False
+        self._batch_total = 0
+    
+    
+    def init_ui(self):
+        self.setWindowTitle("Root Architectural Analysis")
+        self.setGeometry(100, 100, 1600, 900)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        
+        splitter = QSplitter(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        
+        # === PANNEAU GAUCHE ===
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # Fichiers
+        file_group = QGroupBox("Root mask files")
+        file_layout = QVBoxLayout()
+        
+        self.select_btn = QPushButton("Select masks")
+        self.select_btn.clicked.connect(self.select_mask_files)
+        file_layout.addWidget(self.select_btn)
+        
+        self.files_label = QLabel("No files selected")
+        self.files_label.setWordWrap(True)
+        file_layout.addWidget(self.files_label)
+        
+        # --- Dataset selector (remplace la QComboBox) ---
+        self.dataset_selection_label = QLabel("Dataset selection:")
+        self.dataset_selection_label.setStyleSheet("font-weight: bold; font-size: 13px")
+        file_layout.addWidget(self.dataset_selection_label)
+        
+        self.only_segmented_check = QCheckBox("Show only datasets with segmented roots")
+        self.only_segmented_check.setChecked(True)
+        self.only_segmented_check.stateChanged.connect(self._on_only_segmented_toggled)
+        file_layout.addWidget(self.only_segmented_check)
+        
+        self.dataset_selector = DatasetSelectionWidget(parent=self, title="")
+        self.dataset_selector.dataset_view_requested.connect(self._on_dataset_view_requested)
+        file_layout.addWidget(self.dataset_selector)
+        
+        self.refresh_dataset_selector(keep_view=False)
+        
+        file_group.setLayout(file_layout)
+        left_layout.addWidget(file_group)
+        
+        # === PARAMÈTRES D'OPTIMISATION ===
+        optim_group = QGroupBox("⚡ Performance Settings")
+        optim_layout = QVBoxLayout()
+        
+        # Redimensionnement et échantillonnage
+        resize_layout = QGridLayout()
+        resize_layout.addWidget(QLabel("Maximum image size:"), 0, 0)
+        self.resize_spin = QSpinBox()
+        self.resize_spin.setRange(0, 10000)
+        self.resize_spin.setValue(2000)
+        self.resize_spin.setSingleStep(500)
+        self.resize_spin.setSpecialValueText("None (low)")
+        resize_layout.addWidget(self.resize_spin, 0, 1)
+        
+        resize_layout.addWidget(QLabel("Maximum pixel before sampling:"), 1, 0)
+        self.sampling_threshold_spin = QSpinBox()
+        self.sampling_threshold_spin.setRange(10, 100000000)
+        self.sampling_threshold_spin.setValue(100000)
+        self.sampling_threshold_spin.setSingleStep(10000)
+        resize_layout.addWidget(self.sampling_threshold_spin, 1, 1)
+        
+        optim_layout.addLayout(resize_layout)
+        
+        info_label = QLabel("💡 2000px recommended for speed/accuracy balance")
+        info_label.setStyleSheet("color: #666; font-size: 9pt;")
+        info_label.setWordWrap(True)
+        optim_layout.addWidget(info_label)
+        
+        # Taux d'échantillonnage
+        sample_layout = QHBoxLayout()
+        sample_layout.addWidget(QLabel("Sampling:"))
+        self.sample_spin = QDoubleSpinBox()
+        self.sample_spin.setRange(0.01, 1.00)
+        self.sample_spin.setValue(1.00)
+        self.sample_spin.setSingleStep(0.01)
+        self.sample_spin.setDecimals(2)
+        sample_layout.addWidget(self.sample_spin)
+        optim_layout.addLayout(sample_layout)
+        
+        # Itérations max connexion
+        iter_layout = QHBoxLayout()
+        iter_layout.addWidget(QLabel("Maximum iterations:"))
+        self.iter_spin = QSpinBox()
+        self.iter_spin.setRange(1, 100)
+        self.iter_spin.setValue(10)
+        iter_layout.addWidget(self.iter_spin)
+        optim_layout.addLayout(iter_layout)
+        
+        optim_group.setLayout(optim_layout)
+        left_layout.addWidget(optim_group)
+        
+        # Paramètres standard
+        params_group = QGroupBox("Analysis parameters")
+        params_layout = QVBoxLayout()
+        
+        closing_layout = QHBoxLayout()
+        closing_layout.addWidget(QLabel("Closing radius:"))
+        self.closing_spin = QSpinBox()
+        self.closing_spin.setRange(1, 100)
+        self.closing_spin.setValue(5)
+        closing_layout.addWidget(self.closing_spin)
+        params_layout.addLayout(closing_layout)
+        
+        min_branch_layout = QHBoxLayout()
+        min_branch_layout.addWidget(QLabel("Minimum branch size:"))
+        self.min_branch_length_spin = QDoubleSpinBox()
+        self.min_branch_length_spin.setRange(0.0, 100000.0)
+        self.min_branch_length_spin.setValue(10.0)
+        self.min_branch_length_spin.setDecimals(2)
+        min_branch_layout.addWidget(self.min_branch_length_spin)
+        params_layout.addLayout(min_branch_layout)
+        
+        min_object_size_layout = QHBoxLayout()
+        min_object_size_layout.addWidget(QLabel("Minimum object size:"))
+        self.min_object_size_spin = QSpinBox()
+        self.min_object_size_spin.setRange(10, 100000)
+        self.min_object_size_spin.setValue(800)
+        min_object_size_layout.addWidget(self.min_object_size_spin)
+        params_layout.addLayout(min_object_size_layout)
+        
+        max_connection_dst_layout = QHBoxLayout()
+        max_connection_dst_layout.addWidget(QLabel("Maximum connection distance:"))
+        self.max_connection_dst_spin = QSpinBox()
+        self.max_connection_dst_spin.setRange(0, 2000)
+        self.max_connection_dst_spin.setValue(80)
+        max_connection_dst_layout.addWidget(self.max_connection_dst_spin)
+        params_layout.addLayout(max_connection_dst_layout)
+        
+        thickness_layout = QHBoxLayout()
+        thickness_layout.addWidget(QLabel("Connection thickness:"))
+        self.thickness_spin = QSpinBox()
+        self.thickness_spin.setRange(1, 200)
+        self.thickness_spin.setValue(5)
+        thickness_layout.addWidget(self.thickness_spin)
+        params_layout.addLayout(thickness_layout)
+        
+        main_path_bias_layout = QHBoxLayout()
+        main_path_bias_layout.addWidget(QLabel("Main path bias:"))
+        self.main_path_bias_spin = QSpinBox()
+        self.main_path_bias_spin.setRange(0, 1000000)
+        self.main_path_bias_spin.setValue(20)
+        self.main_path_bias_spin.setSingleStep(1)
+        main_path_bias_layout.addWidget(self.main_path_bias_spin)
+        params_layout.addLayout(main_path_bias_layout)
+        
+        pixels_per_cm_layout = QHBoxLayout()
+        pixels_per_cm_layout.addWidget(QLabel("Pixels/cm"))
+        self.pixels_per_cm_spin = QDoubleSpinBox()
+        self.pixels_per_cm_spin.setRange(0.0, 10000.0)
+        self.pixels_per_cm_spin.setValue(0.0)
+        self.pixels_per_cm_spin.setDecimals(3)
+        pixels_per_cm_layout.addWidget(self.pixels_per_cm_spin)
+        params_layout.addLayout(pixels_per_cm_layout)
+        
+        additional_layout = QHBoxLayout()
+        checkbox_layout = QVBoxLayout()
+        self.temporal_check = QCheckBox("Temporal fusion")
+        self.temporal_check.setChecked(True)
+        checkbox_layout.addWidget(self.temporal_check)
+        
+        self.connect_check = QCheckBox("Connect objects")
+        self.connect_check.setChecked(True)
+        checkbox_layout.addWidget(self.connect_check)
+        
+        grid_combobox_layout = QVBoxLayout()
+        grid_title = QLabel("Grid rows and columns:")
+        self.n_grid_rows_combobox = QComboBox()
+        self.n_grid_rows_combobox.addItems([str(i) for i in range(2, self.n_max_rows_grid+1)])
+        self.n_grid_rows_combobox.setCurrentIndex(1)
+        self.n_grid_cols_combobox = QComboBox()
+        self.n_grid_cols_combobox.addItems([str(i) for i in range(2, self.n_max_cols_grid+1)])
+        self.n_grid_cols_combobox.setCurrentIndex(0)
+        grid_combobox_layout.addWidget(grid_title)
+        grid_combobox_layout.addWidget(self.n_grid_rows_combobox)
+        grid_combobox_layout.addWidget(self.n_grid_cols_combobox)
+        additional_layout.addLayout(checkbox_layout)
+        additional_layout.addLayout(grid_combobox_layout)
+        params_layout.addLayout(additional_layout)
+        
+        params_group.setLayout(params_layout)
+        left_layout.addWidget(params_group)
+        
+        # Exécution
+        exec_group = QGroupBox("Execute")
+        exec_layout = QVBoxLayout()
+        
+        self.run_btn = QPushButton("🚀 Start analysis")
+        self.run_btn.clicked.connect(self.run_analysis)
+        self.run_btn.setEnabled(False)
+        self.run_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #4CAF50; 
+                color: white; 
+                font-weight: bold; 
+                padding: 12px;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        exec_layout.addWidget(self.run_btn)
+        
+        self.batch_btn = QPushButton("Process all datasets")
+        self.batch_btn.clicked.connect(self.batch_process_all_datasets)
+        self.batch_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #2196F3; 
+                color: white; 
+                font-weight: bold; 
+                padding: 12px;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background-color: #2196F3;
+            }
+        """)
+        exec_layout.addWidget(self.batch_btn)
+        
+        self.progress_bar = QProgressBar()
+        exec_layout.addWidget(self.progress_bar)
+        
+        self.status_label = QLabel("Ready")
+        exec_layout.addWidget(self.status_label)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setMaximumHeight(120)
+        self.log_text.setReadOnly(True)
+        exec_layout.addWidget(self.log_text)
+        
+        exec_group.setLayout(exec_layout)
+        left_layout.addWidget(exec_group)
+        
+        # Export
+        export_group = QGroupBox("Export")
+        export_layout = QVBoxLayout()
+        
+        self.export_csv_btn = QPushButton("Exporter results (CSV)")
+        self.export_csv_btn.clicked.connect(self.export_csv)
+        self.export_csv_btn.setEnabled(False)
+        export_layout.addWidget(self.export_csv_btn)
+        
+        self.export_images_btn = QPushButton("Export visualizations")
+        self.export_images_btn.clicked.connect(self.export_visualizations)
+        self.export_images_btn.setEnabled(False)
+        export_layout.addWidget(self.export_images_btn)
+        
+        export_group.setLayout(export_layout)
+        left_layout.addWidget(export_group)
+        
+        left_layout.addStretch()
+        splitter.addWidget(left_panel)
+        
+        # === PANNEAU DROIT (identique) ===
+        right_panel = QTabWidget()
+        
+        # Visualisation
+        viz_tab = QWidget()
+        viz_layout = QVBoxLayout(viz_tab)
+        
+        day_control = QHBoxLayout()
+        day_control.addWidget(QLabel("Day:"))
+        
+        self.day_slider = QSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        self.day_slider.setMinimum(0)
+        self.day_slider.setMaximum(0)
+        self.day_slider.valueChanged.connect(self.update_day_visualization)
+        day_control.addWidget(self.day_slider)
+        
+        self.day_label = QLabel("0")
+        day_control.addWidget(self.day_label)
+        
+        viz_layout.addLayout(day_control)
+        
+        self.viz_widget = RootVisualizationWidget(n_max_rows_grid=self.n_max_rows_grid, n_max_cols_grid=self.n_max_cols_grid)
+        viz_layout.addWidget(self.viz_widget)
+        
+        right_panel.addTab(viz_tab, "Visualisation")
+        
+        # Table
+        self.results_table = QTableWidget()
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setSortingEnabled(True)
+        right_panel.addTab(self.results_table, "Results")
+        
+        # Graphiques
+        plots_tab = QWidget()
+        plots_layout = QVBoxLayout(plots_tab)
+        
+        plot_control = QHBoxLayout()
+        plot_control.addWidget(QLabel("Variable:"))
+        self.plot_combo = QComboBox()
+        self.plot_combo.addItems([
+            'total_root_length', 'main_root_length', 'secondary_roots_length',
+            'branch_count', 'root_count_raw', 'root_count', 'root_count_attach',
+            'root_count_raw_cum', 'root_count_cum', 'root_count_attach_cum', 
+            'convex_area', 'total_area', 
+            'mean_secondary_angles', 'mean_abs_secondary_angles', 
+            'std_secondary_angles', 'std_abs_secondary_angles'
+        ])
+        self.plot_combo.currentTextChanged.connect(self.update_plot)
+        plot_control.addWidget(self.plot_combo)
+        plot_control.addStretch()
+        plots_layout.addLayout(plot_control)
+        
+        self.plot_figure = Figure(figsize=(10, 6))
+        self.plot_canvas = FigureCanvas(self.plot_figure)
+        plots_layout.addWidget(self.plot_canvas)
+        
+        right_panel.addTab(plots_tab, "Graphs")
+        
+        # Heatmap
+        heatmap_tab = QWidget()
+        heatmap_layout = QVBoxLayout(heatmap_tab)
+        self.heatmap_widget = RootHeatmapWidget()
+        heatmap_layout.addWidget(self.heatmap_widget)
+        right_panel.addTab(heatmap_tab, "Heatmap")
+        
+        splitter.addWidget(right_panel)
+        splitter.setSizes([450, 1150])
+        
+        main_layout.addWidget(splitter)
+        self.mask_files = []
+        
+        # Après construction complète de l'UI, sélectionner un dataset par défaut (view)
+        QTimer.singleShot(0, lambda: self.refresh_dataset_selector(keep_view=False))
+    
+    
+    # -------------------------
+    # Manage widgets safely if it doesn't exist yet
+    # -------------------------
+    def _safe_set_text(self, attr, text):
+        w = getattr(self, attr, None)
+        if w is not None:
+            w.setText(text)
+    
+    def _safe_set_enabled(self, attr, enabled):
+        w = getattr(self, attr, None)
+        if w is not None:
+            w.setEnabled(enabled)
+    
+    def _safe_set_value(self, attr, text):
+        w = getattr(self, attr, None)
+        if w is not None:
+            w.setValue(text)
+    
+    # -------------------------
+    # Dataset helpers (selection widget)
+    # -------------------------
+    def _dataset_has_root_masks(self, ds):
+        """True si le dataset a un dossier 'roots' avec au moins un masque image."""
+        if ds is None:
+            return False
+        try:
+            seg_dir = ds.segmented_directory.get('roots', None)
+        except Exception:
+            return False
+        if not seg_dir or not os.path.isdir(seg_dir):
+            return False
+        files = [f for f in os.listdir(seg_dir) if f.lower().endswith(self.image_extension_list)]
+        return len(files) > 0
+    
+    def _get_datasets_for_selector(self):
+        """Retourne le dict de datasets à afficher dans le widget."""
+        if not self.datasets:
+            return {}
+        if getattr(self, "_show_only_segmented", True):
+            return {k: v for k, v in self.datasets.items() if self._dataset_has_root_masks(v)}
+        return dict(self.datasets)
+    
+    def refresh_dataset_selector(self, keep_view=True):
+        d = self._get_datasets_for_selector()
+        
+        ui_ready = hasattr(self, "run_btn")  # run_btn est créé tard dans init_ui()
+        current_view = self.dataset_selector.current_viewing_dataset() if keep_view else None
+        
+        # Tant que l'UI n'est pas prête, on ne sélectionne PAS automatiquement un dataset à "view"
+        self.dataset_selector.set_datasets(d, select_first_for_view=ui_ready)
+        
+        if ui_ready and current_view and current_view in d:
+            self.dataset_selector.set_viewing_dataset(current_view, emit_signal=False)
+            self.change_dataset_files(current_view)
+    
+    def _on_only_segmented_toggled(self, state):
+        self._show_only_segmented = (state == (Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked))
+        self.refresh_dataset_selector(keep_view=True)
+    
+    def _on_dataset_view_requested(self, dataset_name):
+        self.change_dataset_files(dataset_name)
+    
+    def select_mask_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select masks", self.output_directory, 
+            "Images (*.png *.jpg *.tiff *.tif *.bmp)"
+        )
+        
+        if files:
+            self.mask_files = sorted(files)
+            mask_dir = os.path.basename(self.mask_files[0])
+            self.current_dataset = os.path.split(mask_dir)[-2]
+            self.files_label.setText(f"{len(files)} selected files")
+            self._safe_set_enabled("run_btn", True)
+            self.log(f"✓ {len(files)} files")
+            
+            days = []
+            for f in self.mask_files:
+                day_match = re.search(r"_J(\d+)_", Path(f).name)
+                if day_match:
+                    days.append(int(day_match.group(1)))
+                else:
+                    day_match = re.search(r"_D(\d+)_", Path(f).name)
+                    if day_match:
+                        days.append(int(day_match.group(1)))
+            if days:
+                self.day_slider.setMinimum(min(days))
+                self.day_slider.setMaximum(max(days))
+                self.day_label.setText(str(min(days)))
+    
+    def change_dataset_files(self, dataset_name=None):
+        """Charge les fichiers (masques racines) du dataset demandé et met à jour l'UI."""
+        if not self.datasets:
+            self.current_dataset = None
+            self.mask_files = []
+            self.files_label.setText("0 selected files")
+            self._safe_set_enabled("run_btn", False)
+            return
+        
+        if dataset_name is None:
+            dataset_name = self.current_dataset
+        
+        if not dataset_name or dataset_name not in self.datasets:
+            self.current_dataset = None
+            self.mask_files = []
+            self._safe_set_text("files_label", "0 selected files")
+            self._safe_set_enabled("run_btn", False)
+            return
+        
+        self.current_dataset = dataset_name
+        
+        ds = self.datasets[self.current_dataset]
+        try:
+            seg_dir = ds.segmented_directory.get('roots', None)
+        except Exception:
+            seg_dir = None
+        
+        if not seg_dir or not os.path.isdir(seg_dir):
+            self.mask_files = []
+            self._safe_set_text("files_label", "0 selected files")
+            self._safe_set_enabled("run_btn", False)
+            self.log(f"✗ No segmented roots directory for: {self.current_dataset}")
+            return
+        
+        self.mask_files = sorted([
+            os.path.join(seg_dir, f)
+            for f in os.listdir(seg_dir)
+            if f.lower().endswith(self.image_extension_list)
+        ])
+        
+        self._safe_set_text("files_label", f"{len(self.mask_files)} selected files")
+        self._safe_set_enabled("run_btn", len(self.mask_files) > 0)
+        self.log(f"✓ {len(self.mask_files)} files")
+        
+        days = []
+        for f in self.mask_files:
+            name = Path(f).name
+            m = re.search(r"_J(\d+)_", name)
+            if m:
+                days.append(int(m.group(1)))
+                continue
+            m = re.search(r"_D(\d+)_", name)
+            if m:
+                days.append(int(m.group(1)))
+        
+        if days:
+            dmin, dmax = min(days), max(days)
+            self.day_slider.setMinimum(dmin)
+            self.day_slider.setMaximum(dmax)
+            self.day_slider.setValue(dmin)
+            self.day_label.setText(str(dmin))
+            self.update_day_visualization()
+        else:
+            self.day_slider.setMinimum(0)
+            self.day_slider.setMaximum(0)
+            self.day_slider.setValue(0)
+            self.day_label.setText("0")
+    
+    def get_analysis_params(self):
+        """Récupération des paramètres incluant optimisations"""
+        return {
+            'closing_radius': self.closing_spin.value(),
+            'min_branch_length': self.min_branch_length_spin.value(),
+            'min_object_size': self.min_object_size_spin.value(),
+            'line_thickness': self.thickness_spin.value(),
+            'temporal_merge': self.temporal_check.isChecked(),
+            'max_connection_dst':self.max_connection_dst_spin.value(),
+            'connect_objects': self.connect_check.isChecked(),
+            'main_path_bias': self.main_path_bias_spin.value(),
+            'pixels_per_cm': self.pixels_per_cm_spin.value(),
+            'grid_rows': int(self.n_grid_rows_combobox.currentText()),
+            'grid_cols': int(self.n_grid_cols_combobox.currentText()),
+            # Paramètres d'optimisation
+            'max_image_size': self.resize_spin.value(),
+            'min_sampling_threshold': self.sampling_threshold_spin.value(),
+            'connection_sample_rate': self.sample_spin.value(),
+            'max_connect_iterations': self.iter_spin.value()
+        }
+    
+    def get_segmented_root_datasets(self):
+        valid_datasets = []
+        for name, info in self.datasets.items():
+            seg_dir = info.segmented_directory.get('roots', None)
+            if seg_dir and os.path.exists(seg_dir):
+                images = [
+                    f for f in os.listdir(seg_dir)
+                    if f.lower().endswith(self.image_extension_list)
+                ]
+                if len(images) > 0:
+                    valid_datasets.append(name)
+        return valid_datasets
+    
+    def get_dataset_index(self, dataset_name):
+        if dataset_name not in self.datasets_list:
+            return
+        
+        for idx, dataset in enumerate(self.datasets_list):
+            if dataset_name.lower() == dataset.lower():
+                return idx
+    
+    def run_analysis(self):
+        """Lancement de l'analyse optimisée"""
+        if self.worker and self.worker.isRunning():
+            return
+        
+        self.refresh_dataset_selector(keep_view=True)
+        params = self.get_analysis_params()
+        
+        # Afficher les optimisations actives
+        if params['min_branch_length'] > 0.0:
+            self.log(f"⚡ Minimum branch length: {params['min_branch_length']}px")
+        if params['max_image_size'] > 0:
+            self.log(f"⚡ Active resizing: max {params['max_image_size']}px")
+        if params['connection_sample_rate'] < 0.1:
+            self.log(f"⚡ Sampling: {params['connection_sample_rate']*100:.0f}%")
+        
+        self.worker = RootArchitectureWorker(self.mask_files, params)
+        
+        self.worker.progress.connect(self.update_progress)
+        self.worker.day_analyzed.connect(self.store_day_data)
+        self.worker.finished.connect(self.analysis_finished)
+        self.worker.error.connect(self.analysis_error)
+        
+        self._safe_set_enabled("run_btn", False)
+        self._safe_set_enabled("select_btn", False)
+        self.progress_bar.setValue(0)
+        self.daily_data.clear()
+        
+        self.worker.start()
+        self.log("Analysis started...")
+    
+    def _get_batch_dataset_names(self):
+        """Retourne la liste de datasets à traiter en batch.
+        
+        Priorité:
+        1) si un DatasetSelectionWidget est présent => datasets cochés
+        2) sinon => tous les datasets qui ont des masques segmentés (roots)
+        """
+        file_extension = tuple([os.extsep + ext for ext in ['png', 'jpg', 'tif', 'tiff']])
+        
+        if not self.datasets:
+            return []
+        
+        # 1) via widget de sélection (si présent)
+        ds_widget = getattr(self, 'dataset_selector', None) or getattr(self, 'dataset_selection_widget', None)
+        if ds_widget is not None:
+            try:
+                names = ds_widget.get_selected_dataset_names()
+            except Exception:
+                names = []
+            names = [n for n in names if n in self.datasets]
+            return sorted(names)
+        
+        # 2) fallback : tous les datasets avec masques roots
+        names = []
+        for ds_name, ds in self.datasets.items():
+            try:
+                seg_dir = ds.segmented_directory.get('roots', None)
+            except Exception:
+                continue
+            if not seg_dir or not os.path.isdir(seg_dir):
+                continue
+            files = [f for f in os.listdir(seg_dir) if f.lower().endswith(file_extension)]
+            if files:
+                names.append(ds_name)
+        return sorted(names)
+    
+    def batch_process_all_datasets(self):
+        """Traite en batch uniquement les datasets cochés dans le widget."""
+        batch_list = self._get_batch_dataset_names()
+        if not batch_list:
+            QMessageBox.information(
+                self, "Batch",
+                "No selected dataset (with segmented root masks) to process."
+            )
+            return
+        
+        # état batch
+        self._batch_active = True
+        self._batch_all_results = []  # DataFrames concaténés en fin de batch
+        self._batch_queue = batch_list
+        self._batch_index = 0
+        self._batch_current = None
+        
+        self.log(f"🚀 Batch start: {len(self._batch_queue)} datasets")
+        
+        # désactiver boutons sensibles
+        self._safe_set_enabled("run_btn", False)
+        self._safe_set_enabled("select_btn", False)
+        self._safe_set_enabled("export_csv_btn", False)
+        self._safe_set_enabled("export_images_btn", False)
+        self._safe_set_enabled("batch_btn", False)
+        
+        self._batch_start_next()
+    
+    def _batch_start_next(self):
+        if not getattr(self, "_batch_active", False):
+            return
+        
+        if self._batch_index >= len(self._batch_queue):
+            # fin batch
+            self._batch_active = False
+            self._safe_set_enabled("batch_btn", True)
+            self._safe_set_enabled("run_btn", True)
+            self.log("✅ Batch terminé")
+            
+            # s'assurer que la barre de progression arrive à 100%
+            try:
+                self.progress_bar.setValue(100)
+            except Exception:
+                pass
+            
+            # Export CSV global (tous datasets du batch)
+            try:
+                if getattr(self, "_batch_all_results", None):
+                    batch_df = pd.concat(self._batch_all_results, ignore_index=True)
+                    batch_csv = os.path.join(self.output_directory, "batch_root_architecture_results.csv")
+                    batch_df.to_csv(batch_csv, sep=';', index=False)
+                    self.log(f"💾 Batch CSV global: {batch_csv}")
+            except Exception as e:
+                self.log(f"⚠️ Impossible d'exporter le CSV global batch: {e}")
+            
+            QMessageBox.information(self, "Batch", "Batch processing terminé.")
+            return
+        
+        ds_name = self._batch_queue[self._batch_index]
+        self._batch_current = ds_name
+        self._batch_index += 1
+        
+        # sélectionner le dataset (widget)
+        if hasattr(self, 'dataset_selector'):
+            self.dataset_selector.set_viewing_dataset(ds_name, emit_signal=True)
+        else:
+            # fallback: remplir mask_files directement
+            seg_dir = self.datasets[ds_name].segmented_directory['roots']
+            file_extension = tuple([os.extsep + ext for ext in ['png', 'jpg', 'tif', 'tiff']])
+            self.mask_files = sorted([os.path.join(seg_dir, f) for f in os.listdir(seg_dir) if f.lower().endswith(file_extension)])
+            self.current_dataset = ds_name
+        
+        self.daily_data = {}
+        self.current_df = None
+        
+        self.log(f"▶ Analyse: {ds_name} ({self._batch_index}/{len(self._batch_queue)})")
+        
+        # lance l’analyse normale (asynchrone)
+        self.run_analysis()
+    
+    def update_progress(self, value, message):
+        self._safe_set_value("progress_bar", value)
+        self._safe_set_text("status_label", message)
+    
+    def store_day_data(self, day, features, original, merged):
+        self.daily_data[day] = (features, original, merged)
+        self.log(f"✓ J{day}: {features['total_root_length']:.1f}px")
+        
+        if len(self.daily_data) == 1:
+            days = sorted(self.daily_data.keys())
+            self.day_slider.setMinimum(min(days))
+            self.day_slider.setMaximum(max(days))
+            self.day_slider.setValue(min(days))
+        else:
+            days = sorted(self.daily_data.keys())
+            self.day_slider.setMaximum(max(days))
+    
+    def update_day_visualization(self):
+        """Met à jour la visualisation pour le jour le plus proche ayant des données.
+        
+        Si le slider pointe sur un jour sans données, on "snap" automatiquement
+        au jour disponible le plus proche, ce qui revient à rendre uniquement
+        ces jours réellement sélectionnables.
+        """
+        if not self.daily_data:
+            return
+        
+        requested_day = self.day_slider.value()
+        available_days = sorted(self.daily_data.keys())
+        
+        # Trouver le jour le plus proche parmi ceux pour lesquels on a des données
+        closest_day = min(available_days, key=lambda d: abs(d - requested_day))
+        
+        # Si le slider est sur un jour sans données, on le ramène sur le plus proche
+        if closest_day != requested_day:
+            self.day_slider.blockSignals(True)
+            self.day_slider.setValue(closest_day)
+            self.day_slider.blockSignals(False)
+        
+        day = closest_day
+        self.day_label.setText(str(day))
+        
+        features, original, merged = self.daily_data[day]
+        self.viz_widget.set_day_data(day, features, original, merged, dataset=self.current_dataset)
+    
+    def analysis_finished(self, df):
+        # Post-traitement du DataFrame : ajout d'une colonne de racines cumulatives
+        if df is not None and not df.empty:
+            # Tri indispensable pour une cinétique propre
+            sort_cols = [c for c in ['modality', 'day'] if c in df.columns]
+            if sort_cols:
+                df = df.sort_values(sort_cols)
+            
+            # Éviter les doublons (souvent causés par des chemins de fichiers dupliqués)
+            subset_cols = [c for c in ['dataset','filename','day','modality'] if c in df.columns]
+            if subset_cols:
+                df = df.drop_duplicates(subset=subset_cols, keep='first')
+            else:
+                df = df.drop_duplicates(keep='first')
+            
+            # Helper: ajoute une colonne cummax par modalité (ou global si pas de modality)
+            def add_cummax(col_name: str, out_name: str):
+                if col_name not in df.columns:
+                    return
+                if 'modality' in df.columns:
+                    df[out_name] = df.groupby('modality')[col_name].cummax()
+                else:
+                    df[out_name] = df[col_name].cummax()
+                # éviter les NaN si jamais
+                df[out_name] = df[out_name].fillna(0).astype(int)
+            
+            # Cumulatifs non décroissants
+            add_cummax('root_count', 'root_count_cum')
+            add_cummax('root_count_raw', 'root_count_raw_cum')
+            add_cummax('root_count_attach', 'root_count_attach_cum')
+        
+        self.current_df = df
+        
+        # --------------------
+        # Batch mode: auto-export + next dataset
+        # --------------------
+        if getattr(self, "_batch_active", False):
+            ds = self.datasets[self.current_dataset]
+            
+            # dossier de sortie dataset (roots)
+            out_dir = ds.result_directory.get('roots', None)
+            if not out_dir:
+                # fallback: crée un dossier Results/Roots dans le dataset
+                out_dir = os.path.join(ds.path, "Results", "Roots")
+                os.makedirs(out_dir, exist_ok=True)
+                ds.result_directory['roots'] = out_dir
+            
+            # export CSV
+            csv_path = os.path.join(out_dir, f"{self.current_dataset}_root_architecture_results.csv")
+            self.current_df.to_csv(csv_path, sep=';', index=False)
+            
+            # export visualisations
+            viz_dir = os.path.join(out_dir, "Visualisations")
+            os.makedirs(viz_dir, exist_ok=True)
+            self.export_visualizations_to(viz_dir)
+            
+            self.log(f"✅ Exported: {self.current_dataset} -> {out_dir}")
+            # Ajouter au CSV global (batch)
+            try:
+                df_batch = self.current_df.copy()
+                if 'dataset' not in df_batch.columns:
+                    df_batch.insert(0, 'dataset', self.current_dataset)
+                self._batch_all_results.append(df_batch)
+            except Exception as e:
+                self.log(f"⚠️ Batch aggregation failed: {e}")
+            
+            
+            # rafraîchir l'UI avant de passer au dataset suivant
+            self.populate_results_table(self.current_df)
+            self.update_plot()
+            self.update_day_visualization()
+            # Forcer le repaint (utile en batch)
+            QApplication.processEvents()
+            
+            # enchaîner le dataset suivant (laisser la boucle d'événements respirer)
+            QTimer.singleShot(0, self._batch_start_next)
+            return
+        
+        self._safe_set_enabled("export_csv_btn", True)
+        self._safe_set_enabled("export_images_btn", True)
+        
+        self.populate_results_table(df)
+        self.update_plot()
+        self.update_day_visualization()
+        
+        self._safe_set_enabled("run_btn", True)
+        self._safe_set_enabled("select_btn", True)
+        self.progress_bar.setValue(100)
+        self.status_label.setText("✓ Terminé")
+        
+        self.log(f"✅ Analyse terminée: {len(df)} échantillons")
+        
+        QMessageBox.information(
+            self, "Analysis complete",
+            f"✅ Analysis successfully completed!\n\n"
+            f"📊 {len(df)} samples analyzed\n"
+        )
+    
+    def analysis_error(self, error_msg):
+        self._safe_set_enabled("run_btn", True)
+        self._safe_set_enabled("select_btn", True)
+        self.log(f"❌ ERROR: {error_msg}")
+        
+        QMessageBox.critical(
+            self, "Analysis error:",
+            f"An error has occurred:\n{error_msg}"
+        )
+    
+    def populate_results_table(self, df):
+        self.results_table.setRowCount(len(df))
+        self.results_table.setColumnCount(len(df.columns))
+        self.results_table.setHorizontalHeaderLabels(df.columns.tolist())
+        
+        for i, row in df.iterrows():
+            for j, value in enumerate(row):
+                if isinstance(value, float):
+                    item = QTableWidgetItem(f"{value:.2f}")
+                else:
+                    item = QTableWidgetItem(str(value))
+                self.results_table.setItem(i, j, item)
+        
+        self.results_table.resizeColumnsToContents()
+    
+    def update_plot(self):
+        if self.current_df is None:
+            return
+        
+        variable = self.plot_combo.currentText()
+        
+        self.plot_figure.clear()
+        ax = self.plot_figure.add_subplot(111)
+        
+        for modality in self.current_df['modality'].unique():
+            subset = self.current_df[self.current_df['modality'] == modality]
+            subset = subset.sort_values('day')
+            
+            ax.plot(subset['day'], subset[variable], 
+                   marker='o', label=f'{modality}', linewidth=2)
+        
+        ax.set_xlabel('Day', fontsize=12)
+        ax.set_ylabel(variable.replace('_', ' ').title(), fontsize=12)
+        ax.set_title(f'Evolution - {variable.replace("_", " ").title()}', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        self.plot_figure.tight_layout()
+        self.plot_canvas.draw()
+    
+    def export_csv(self):
+        if self.current_df is None:
+            return
+        
+        default_path = os.path.join(self.output_directory, self.current_dataset + "-root_architecture_results.csv")
+        filename, _ = QFileDialog.getSaveFileName(self, "Save results", default_path,
+                                                  "CSV Files (*.csv)")
+        
+        if filename:
+            self.current_df.to_csv(filename, index=False)
+            self.log(f"💾 Exporté: {filename}")
+            QMessageBox.information(self, "Export successful", f"Results saved:\n{filename}")
+    
+    def export_visualizations(self):
+        if not self.daily_data:
+            return
+        
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select output directory", 
+        )
+        
+        if output_dir:
+            output_path = Path(output_dir)
+        
+            for day in sorted(self.daily_data.keys()):
+                features, original, merged = self.daily_data[day]
+                
+                fig = Figure(figsize=(12, 10))
+                
+                ax1 = fig.add_subplot(2, 2, 1)
+                ax2 = fig.add_subplot(2, 2, 2)
+                ax3 = fig.add_subplot(2, 2, 3)
+                ax4 = fig.add_subplot(2, 2, 4)
+                
+                ax1.imshow(original, cmap='gray')
+                ax1.set_title(f'Original - J{day}')
+                ax1.axis('off')
+                
+                ax2.imshow(merged, cmap='gray')
+                ax2.set_title('Merged')
+                ax2.axis('off')
+                
+                if len(features.get('skeleton', [])) > 0:
+                    ax3.imshow(features['skeleton'], cmap='gray')
+                    
+                    if len(features.get('convex_hull', [])) > 0:
+                        ax3.imshow(features['convex_hull'], cmap='Reds', alpha=0.2)
+                    
+                    if len(features.get('main_path', [])) > 0:
+                        main_path = features['main_path']
+                        ax3.plot(main_path[:, 1], main_path[:, 0], 'r-', linewidth=2)
+                    
+                    if len(features.get('endpoints', [])) > 0:
+                        endpoints = features['endpoints']
+                        ax3.scatter(endpoints[:, 1], endpoints[:, 0], c='yellow', s=30, 
+                                  marker='o', edgecolors='red', linewidths=1)
+                    
+                    ax3.set_title('Skeleton')
+                    ax3.axis('off')
+                
+                ax4.axis('off')
+                stats_text = f"""
+Day {day}
+Dataset: {self.current_dataset}
+
+Main root length: {features['main_root_length']:.1f} px
+Secondary roots length: {features['secondary_roots_length']:.1f} px
+Total length: {features['total_root_length']:.1f} px
+
+Number of branches: {features['branch_count']}
+Number of end points without pruning: {features['endpoint_count_raw']}
+Number of roots without pruning: {features['root_count_raw']}
+Number of end points: {features['endpoint_count']}
+Number of roots: {features['root_count']}
+
+Root count attach: {features['root_count_attach']}
+
+Mean secondary angles: {features['mean_secondary_angles']:.2f}
+Standard deviation secondary angles: {features['std_secondary_angles']:.2f}
+Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}
+Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}
+
+Total area: {features['total_area']:.0f} px²
+Convex area: {features['convex_area']:.0f} px²
+
+Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
+                """
+                ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, 
+                        fontsize=10, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                
+                fig.tight_layout()
+                
+                save_path = output_path / f"root_arch_J{day:03d}.png"
+                fig.savefig(str(save_path), dpi=300, bbox_inches='tight')
+                plt.close(fig)
+            
+            self.log(f"💾 {len(self.daily_data)} exported images")
+            
+            QMessageBox.information(
+                self, "Export successful",
+                f"{len(self.daily_data)} exported visualizations"
+            )
+    
+    def export_visualizations_to(self, output_dir: str):
+        """Export des visualisations (2x2) sans boîte de dialogue (mode batch)."""
+        if not self.daily_data:
+            return
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        for day in sorted(self.daily_data.keys()):
+            features, original, merged = self.daily_data[day]
+            
+            fig = Figure(figsize=(15, 10))
+            ax1 = fig.add_subplot(2, 2, 1)
+            ax2 = fig.add_subplot(2, 2, 2)
+            ax3 = fig.add_subplot(2, 2, 3)
+            ax4 = fig.add_subplot(2, 2, 4)
+            
+            ax1.imshow(original, cmap='gray')
+            ax1.set_title(f'Original - J{day}')
+            ax1.axis('off')
+            
+            ax2.imshow(merged, cmap='gray')
+            ax2.set_title('Merged')
+            ax2.axis('off')
+            
+            if len(features.get('skeleton', [])) > 0:
+                ax3.imshow(features['skeleton'], cmap='gray')
+                
+                if len(features.get('convex_hull', [])) > 0:
+                    ax3.imshow(features['convex_hull'], cmap='Reds', alpha=0.2)
+                
+                if len(features.get('main_path', [])) > 0:
+                    main_path = features['main_path']
+                    ax3.plot(main_path[:, 1], main_path[:, 0], 'r-', linewidth=2)
+                
+                if len(features.get('endpoints', [])) > 0:
+                    endpoints = features['endpoints']
+                    ax3.scatter(endpoints[:, 1], endpoints[:, 0], c='yellow', s=30, 
+                              marker='o', edgecolors='red', linewidths=1)
+                
+                ax3.set_title('Skeleton')
+                ax3.axis('off')
+            
+            ax4.axis('off')
+            stats_text = f"""
+Day {day}
+Dataset: {self.current_dataset}
+
+Main root length: {features['main_root_length']:.1f} px
+Secondary roots length: {features['secondary_roots_length']:.1f} px
+Total length: {features['total_root_length']:.1f} px
+
+Number of branches: {features['branch_count']}
+Number of end points without pruning: {features['endpoint_count_raw']}
+Number of roots without pruning: {features['root_count_raw']}
+Number of end points: {features['endpoint_count']}
+Number of roots: {features['root_count']}
+
+Root count attach: {features['root_count_attach']}
+
+Mean secondary angles: {features['mean_secondary_angles']:.2f}
+Standard deviation secondary angles: {features['std_secondary_angles']:.2f}
+Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}
+Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}
+
+Total area: {features['total_area']:.0f} px²
+Convex area: {features['convex_area']:.0f} px²
+
+Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
+            """
+            
+            # --- Grid: show summary + heatmap without overlapping the text ---
+            gl = features.get("grid_lengths", None)
+            if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
+                try:
+                    stats_text += f"""
+            Grid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px
+            """
+                except Exception:
+                    pass
+                try:
+                    inset = ax4.inset_axes([0.10, 0.05, 0.85, 0.28])
+                    inset.imshow(gl, aspect='auto', origin='upper')
+                    inset.set_title("Grid length heatmap (px)", fontsize=8)
+                    inset.set_xticks(range(gl.shape[1]))
+                    inset.set_yticks(range(gl.shape[0]))
+                    inset.tick_params(axis='both', which='major', labelsize=7)
+                    inset.set_xlabel("col", fontsize=7)
+                    inset.set_ylabel("row", fontsize=7)
+                except Exception:
+                    pass
+                text_y = 0.98
+            else:
+                text_y = 0.90
+            
+            ax4.text(0.1, text_y, stats_text, transform=ax4.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            fig.tight_layout()
+            
+            save_path = output_path / f"{self.current_dataset}_root_arch_J{day:03d}.png"
+            fig.savefig(str(save_path), dpi=300, bbox_inches='tight')
+            plt.close(fig)
+        
+        self.log(f"💾 {len(self.daily_data)} exported images (batch)")
+     
+    def log(self, message):
+        """Log robuste: fonctionne même si l'UI n'est pas encore construite."""
+        if hasattr(self, 'log_text') and self.log_text is not None:
+            self.log_text.append(message)
+            try:
+                self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+            except Exception:
+                pass
+        else:
+            print(message)
+    
+
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    
+    window = RootArchitectureWindow()
+    window.show()
+    
+    if PYQT_VERSION == 6:
+        sys.exit(app.exec())
+    else:
+        sys.exit(app.exec_())
+        # Grille (pour longueurs par section)
+        try:
+            params["grid_rows"] = int(self.viz_widget.n_rows_grid_combo.currentText())
+            params["grid_cols"] = int(self.viz_widget.n_cols_grid_combo.currentText())
+        except Exception:
+            params["grid_rows"] = None
+            params["grid_cols"] = None
