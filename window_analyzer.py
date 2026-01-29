@@ -1681,7 +1681,26 @@ class RootArchitectureWindow(QMainWindow):
     
     def init_ui(self):
         self.setWindowTitle("Root Architectural Analysis")
-        self.setGeometry(100, 100, 1600, 900)
+        
+        # --- Taille initiale adaptative ---
+        try:
+            screen = QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen is not None else None
+            sw = int(geom.width()) if geom is not None else 1600
+            sh = int(geom.height()) if geom is not None else 900
+            
+            win_w = min(1600, int(sw * 0.95))
+            win_h = min(900,  int(sh * 0.90))
+            self.setGeometry(50, 50, win_w, win_h)
+            
+            # Réduction légère de la police pour les faibles résolutions et garder l'UI lisible
+            if sh <= 900:
+                f = self.font()
+                if f.pointSize() > 0:
+                    f.setPointSize(max(8, f.pointSize() - 1))
+                    self.setFont(f)
+        except Exception:
+            self.setGeometry(100, 100, 1600, 900)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1717,6 +1736,13 @@ class RootArchitectureWindow(QMainWindow):
         
         self.dataset_selector = DatasetSelectionWidget(parent=self, title="")
         self.dataset_selector.dataset_view_requested.connect(self._on_dataset_view_requested)
+        
+        # On s'assure que le choix des datasets soit toujours utilisable sur de faibles résolutions
+        try:
+            self.dataset_selector.list_widget.setMinimumHeight(120)
+        except Exception:
+            pass
+        
         file_layout.addWidget(self.dataset_selector)
         
         self.refresh_dataset_selector(keep_view=False)
@@ -1935,7 +1961,26 @@ class RootArchitectureWindow(QMainWindow):
         left_layout.addWidget(export_group)
         
         left_layout.addStretch()
-        splitter.addWidget(left_panel)
+
+        # On ajoute un scrolling verticale au panneau de gauche
+        # Cela prévient l'écrasement de la liste des datasets sur de faibles résolutions
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        try:
+            left_scroll.setFrameShape(QScrollArea.Shape.NoFrame if PYQT_VERSION == 6 else QScrollArea.NoFrame)
+        except Exception:
+            pass
+        left_scroll.setWidget(left_panel)
+
+        # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
+        try:
+            left_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VERSION == 6 else Qt.ScrollBarAlwaysOff
+            )
+        except Exception:
+            pass
+
+        splitter.addWidget(left_scroll)
         
         # === PANNEAU DROIT (identique) ===
         right_panel = QTabWidget()
@@ -2003,7 +2048,12 @@ class RootArchitectureWindow(QMainWindow):
         right_panel.addTab(heatmap_tab, "Heatmap")
         
         splitter.addWidget(right_panel)
-        splitter.setSizes([450, 1150])
+        # Proportions plus robuste du splitter pour de faibles résolutions
+        try:
+            left_w = max(300, int(self.width() * 0.32))
+            splitter.setSizes([left_w, max(400, self.width() - left_w)])
+        except Exception:
+            splitter.setSizes([450, 1150])
         
         main_layout.addWidget(splitter)
         self.mask_files = []
@@ -2013,7 +2063,7 @@ class RootArchitectureWindow(QMainWindow):
     
     
     # -------------------------
-    # Manage widgets safely if it doesn't exist yet
+    # Gestion plus sûre des widgets
     # -------------------------
     def _safe_set_text(self, attr, text):
         w = getattr(self, attr, None)
@@ -2171,7 +2221,7 @@ class RootArchitectureWindow(QMainWindow):
             self.day_label.setText("0")
     
     def get_analysis_params(self):
-        """Récupération des paramètres incluant optimisations"""
+        """Récupération des paramètres incluant les paramètres d'optimisations """
         return {
             'closing_radius': self.closing_spin.value(),
             'min_branch_length': self.min_branch_length_spin.value(),

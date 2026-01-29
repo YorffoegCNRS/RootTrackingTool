@@ -18,14 +18,14 @@ PYQT_VERSION = None
 
 try:
     from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
-    from PyQt6.QtWidgets import QApplication, QWidget, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar
+    from PyQt6.QtWidgets import QApplication, QWidget, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
     from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence, QAction
     PYQT_AVAILABLE = True
     PYQT_VERSION = 6
 except:
     try:
         from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
-        from PyQt5.QtWidgets import QApplication, QWidget, QAction, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar
+        from PyQt5.QtWidgets import QApplication, QWidget, QAction, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
         from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence
         PYQT_AVAILABLE = True
         PYQT_VERSION = 5
@@ -748,10 +748,15 @@ class App(QWidget):
         # Splitter principal
         splitter = QSplitter(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
         main_layout.addWidget(splitter)
-        
-        # Panel de gauche
+        # Panel de gauche (dans un QScrollArea pour les petites résolutions)
         left_panel = self._createLeftPanel()
-        splitter.addWidget(left_panel)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame if PYQT_VERSION == 6 else QFrame.NoFrame)
+        left_scroll.setWidget(left_panel)
+        # Empêche le panneau de gauche d'être écrasé verticalement : on scroll au lieu de compresser
+        left_scroll.setMinimumWidth(320)
+        splitter.addWidget(left_scroll)
         
         # Panel de droite (image avec onglets)
         right_panel = self._createRightPanel()

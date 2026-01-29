@@ -21,8 +21,6 @@ except:
 
 
 
-
-
 def _wait_cursor():
     """Qt wait cursor compatible PyQt5/PyQt6."""
     if PYQT_VERSION == 6:
@@ -31,6 +29,7 @@ def _wait_cursor():
         except Exception:
             return Qt.WaitCursor
     return Qt.WaitCursor
+
 
 
 @contextmanager
