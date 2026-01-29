@@ -1028,6 +1028,7 @@ class RootArchitectureAnalyzer:
             'skeleton_pruned': np.array([])
         }
 
+
 class RootArchitectureWorker(QThread):
     """Worker optimisé pour l'analyse"""
     
@@ -1060,6 +1061,13 @@ class RootArchitectureWorker(QThread):
     def run(self):
         """Exécution optimisée de l'analyse (avec racine principale globale)"""
         try:
+            def _check_interrupt():
+                try:
+                    if self.isInterruptionRequested():
+                        raise InterruptedError("Stopped by user")
+                except AttributeError:
+                    return
+
             # ----------------------------
             # 1) Pré-traitement de tous les jours
             # ----------------------------
@@ -1068,6 +1076,7 @@ class RootArchitectureWorker(QThread):
             total = len(self.mask_files)
             
             for idx, mask_file in enumerate(self.mask_files):
+                _check_interrupt()
                 filename = Path(mask_file).stem
                 # 0 -> 50% pendant le pré-traitement. Le +1 permet d'atteindre 50% sur le dernier item.
                 preprocess_progress = int(((idx + 1) / max(total, 1)) * 50)
@@ -1079,10 +1088,16 @@ class RootArchitectureWorker(QThread):
                     mask = tiff.imread(mask_file)
                     if mask.ndim > 2:
                         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    # Safety checks
+                    if mask.ndim != 2:
+                        raise ValueError(f"Mask must be 2D after conversion, got ndim={mask.ndim} for {mask_file}")
+
                 else:
                     mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
                     if mask is None:
                         raise ValueError(f"Could not read image: {mask_file}")
+                    if mask.ndim != 2:
+                        raise ValueError(f"Mask must be 2D after reading, got ndim={mask.ndim} for {mask_file}")
                 
                 # Redimensionner si nécessaire
                 mask = self.analyzer.resize_if_needed(mask)
@@ -1105,6 +1120,7 @@ class RootArchitectureWorker(QThread):
                             (binary_mask.shape[1], binary_mask.shape[0]),
                             interpolation=cv2.INTER_NEAREST
                         )
+                    validate_same_shape(previous_merged, binary_mask, name_a="previous_merged", name_b="binary_mask")
                     merged_mask = np.logical_or(binary_mask, previous_merged).astype(np.uint8)
                 else:
                     merged_mask = binary_mask.copy()
@@ -1161,6 +1177,7 @@ class RootArchitectureWorker(QThread):
             
             # Analyse du dernier jour (sert de référence)
             self.progress.emit(50, f"Analysis: {last_item['filename']}")
+            _check_interrupt()
             last_features = self.analyzer.skeletonize_and_analyze(
                 last_item["processed"],
                 grid_rows=self.params.get("grid_rows", None),
@@ -1183,6 +1200,7 @@ class RootArchitectureWorker(QThread):
             # 3) Remonter dans le temps : J(N-1) -> J0
             # ----------------------------
             for item in reversed(preprocessed[:-1]):
+                _check_interrupt()
                 day = item["day"]
                 filename = item["filename"]
                 
@@ -1232,6 +1250,7 @@ class RootArchitectureWorker(QThread):
                         max(50, min(99, 50 + int((analyzed_done / analysis_steps) * 50))),
                         f"Re-aligning last day (J{last_day}) to previous main root"
                     )
+                    _check_interrupt()
                     corrected_last = self.analyzer.skeletonize_and_analyze(
                         last_item["processed"],
                         main_ref_path=prev_path,
@@ -1246,6 +1265,7 @@ class RootArchitectureWorker(QThread):
             # ----------------------------
             results = []
             for item in preprocessed:
+                _check_interrupt()
                 day = item["day"]
                 filename = item["filename"]
                 modality = item["modality"]
@@ -1291,6 +1311,8 @@ class RootArchitectureWorker(QThread):
             
             df = pd.DataFrame(results)
             self.finished.emit(df)
+        except InterruptedError as e:
+            self.error.emit(str(e))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1677,6 +1699,7 @@ class RootArchitectureWindow(QMainWindow):
         self._batch_current = None
         self._batch_running = False
         self._batch_total = 0
+        self._stop_requested = False
     
     
     def init_ui(self):
@@ -1928,6 +1951,29 @@ class RootArchitectureWindow(QMainWindow):
             }
         """)
         exec_layout.addWidget(self.batch_btn)
+        
+        self.stop_btn = QPushButton("⛔ Stop")
+        self.stop_btn.clicked.connect(self.stop_analysis)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                font-weight: bold;
+                padding: 12px;
+                font-size: 11pt;
+            }
+            
+            QPushButton:hover {
+                background-color: #D32F2F;
+            }
+            
+            QPushButton:disabled {
+                background-color: #BDBDBD;
+                color: #666666;
+            }
+        """)
+        exec_layout.addWidget(self.stop_btn)
         
         self.progress_bar = QProgressBar()
         exec_layout.addWidget(self.progress_bar)
@@ -2273,6 +2319,33 @@ class RootArchitectureWindow(QMainWindow):
         for idx, dataset in enumerate(self.datasets_list):
             if dataset_name.lower() == dataset.lower():
                 return idx
+    
+    def stop_analysis(self):
+        """Arrête l'analyse en cours (single or batch)  """
+        worker = getattr(self, "worker", None)
+        if worker is None or not worker.isRunning():
+            return
+        
+        # Stop batch chaining immediately (prevents launching the next dataset)
+        if getattr(self, "_batch_active", False):
+            self._batch_active = False
+            try:
+                self._batch_queue = []
+            except Exception:
+                pass
+        
+        self._stop_requested = True
+        self.log("⛔ Stop requested...")
+        
+        # UI feedback
+        self._safe_set_enabled("stop_btn", False)
+        self._safe_set_text("status_label", "Stopping...")
+        
+        # Ask the worker to stop (no terminate(), unsafe)
+        try:
+            worker.requestInterruption()
+        except Exception:
+            pass
     
     def run_analysis(self):
         """Lancement de l'analyse optimisée"""
