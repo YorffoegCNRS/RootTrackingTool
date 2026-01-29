@@ -18,7 +18,7 @@ try:
     from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                 QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
-                                QGroupBox, QSpinBox, QFileDialog, QSlider,
+                                QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
                                 QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
                                 QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
     from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
@@ -28,7 +28,7 @@ except:
     try:
         from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                     QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
-                                    QGroupBox, QSpinBox, QFileDialog, QSlider,
+                                    QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
                                     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
                                     QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
         from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
@@ -1990,18 +1990,30 @@ class RootArchitectureWindow(QMainWindow):
         viz_layout = QVBoxLayout(viz_tab)
         
         day_control = QHBoxLayout()
+        day_control.setContentsMargins(0, 0, 0, 0)
+        day_control.setSpacing(6)
         day_control.addWidget(QLabel("Day:"))
         
         self.day_slider = QSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
         self.day_slider.setMinimum(0)
         self.day_slider.setMaximum(0)
+        self.day_slider.setFixedHeight(18)
         self.day_slider.valueChanged.connect(self.update_day_visualization)
         day_control.addWidget(self.day_slider)
         
         self.day_label = QLabel("0")
         day_control.addWidget(self.day_label)
         
-        viz_layout.addLayout(day_control)
+        # conteneur bloqué en hauteur
+        day_container = QWidget()
+        day_container.setLayout(day_control)
+        day_container.setFixedHeight(26)
+        
+        size_policy = day_container.sizePolicy()
+        size_policy.setVerticalPolicy(QSizePolicy.Fixed)
+        day_container.setSizePolicy(size_policy)
+        
+        viz_layout.addWidget(day_container)
         
         self.viz_widget = RootVisualizationWidget(n_max_rows_grid=self.n_max_rows_grid, n_max_cols_grid=self.n_max_cols_grid)
         viz_layout.addWidget(self.viz_widget)
