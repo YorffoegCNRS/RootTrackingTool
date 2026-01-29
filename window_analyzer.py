@@ -2010,7 +2010,7 @@ class RootArchitectureWindow(QMainWindow):
         day_container.setFixedHeight(26)
         
         size_policy = day_container.sizePolicy()
-        size_policy.setVerticalPolicy(QSizePolicy.Fixed)
+        size_policy.setVerticalPolicy(QSizePolicy.Policy.Fixed if PYQT_VERSION == 6 else QSizePolicy.Fixed)
         day_container.setSizePolicy(size_policy)
         
         viz_layout.addWidget(day_container)
