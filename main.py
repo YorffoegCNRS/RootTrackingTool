@@ -638,8 +638,9 @@ class ImageDisplayWidget(QLabel):
 
 
 class App(QWidget):
-    def __init__(self, current_script_name, current_directory, parent=None):
+    def __init__(self, current_script_name, current_directory, screen_size=None, parent=None):
         super(App, self).__init__(parent)
+        self.screen_size = screen_size
         self.parent = parent
         self.app_title = "Roots System Analyzer"
         self.current_script_name = current_script_name
@@ -1708,7 +1709,7 @@ class App(QWidget):
         if self.root_arch_window is None or not self.root_arch_window.isVisible():
             self.root_arch_window = RootArchitectureWindow(self, init_params=self.cleaning_mask_parameters, 
                                                             datasets=self.datasets, current_dir=self.current_directory, 
-                                                            output_dir=self.base_output_directory)
+                                                            output_dir=self.base_output_directory, screen_size=self.screen_size)
             self.root_arch_window.show()
         else:
             self.root_arch_window.raise_()
@@ -1964,15 +1965,22 @@ class App(QWidget):
 
 
 class ApplicationWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, screen=None):
         super(ApplicationWindow, self).__init__()
+        self.screen = screen
+        self.screen_size = [self.screen.size().width(), self.screen.size().height()]
+        self.max_main_window_size = [1800, 1300]
+        self.main_geometry = [0, 0, min(int(self.screen_size[0] * 0.9), self.max_main_window_size[0]), min(int(self.screen_size[1] * 0.9), self.max_main_window_size[1])]
+        self.main_geometry[0] = min(100, self.screen_size[0] - self.main_geometry[2])
+        self.main_geometry[1] = min(100, self.screen_size[1] - self.main_geometry[3])
+        
         self.setWindowTitle("Dataset Analysis: Roots & Leaves System")
-        self.setGeometry(100, 100, 1800, 1200)
+        self.setGeometry(self.main_geometry[0], self.main_geometry[1], self.main_geometry[2], self.main_geometry[3])
         
         # Widget central
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         self.icons_directory = os.path.join(self.current_dir, "icons")
-        self.mainWidget = App("main", self.current_dir, parent=self)
+        self.mainWidget = App("main", self.current_dir, screen_size=self.screen_size, parent=self)
         self.setCentralWidget(self.mainWidget)
         
         # Icons
@@ -2054,7 +2062,9 @@ class ApplicationWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    window = ApplicationWindow()
+    screen = app.primaryScreen()
+    
+    window = ApplicationWindow(screen=screen)
     window.show()
     if PYQT_VERSION == 6:
         sys.exit(app.exec())
