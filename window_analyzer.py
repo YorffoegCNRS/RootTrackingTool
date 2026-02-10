@@ -622,18 +622,35 @@ class RootArchitectureAnalyzer:
         # 2) Si ça n’a pas marché, on revient au comportement classique :
         #    extrémités les plus éloignées verticalement, puis fallback "plus long chemin"
         if main_path_length == 0.0 and len(endpoint_coords) >= 2:
-            highest = max(endpoint_coords, key=lambda x: x[0])
-            lowest = min(endpoint_coords, key=lambda x: x[0])
+            # Fallback robuste: choisir la paire d'endpoints la plus éloignée (toutes orientations).
+            # L'ancienne heuristique (max/min sur l'axe vertical) échoue si la racine est horizontale
+            # ou si plusieurs extrémités ont la même coordonnée Y.
+            try:
+                ep = np.asarray(endpoint_coords, dtype=float)
+                if ep.ndim == 2 and ep.shape[0] >= 2:
+                    # distances entre endpoints (petit N -> O(N^2) OK)
+                    D = cdist(ep, ep)
+                    i0, i1 = np.unravel_index(np.argmax(D), D.shape)
+                    p0 = ep[i0]
+                    p1 = ep[i1]
+                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - p0))
+                    end_node   = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - p1))
+                else:
+                    start_node = end_node = None
+            except Exception:
+                start_node = end_node = None
             
-            highest_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - highest))
-            lowest_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - lowest))
+            if start_node is None or end_node is None:
+                # dernier recours: ancien comportement (vertical)
+                highest = max(endpoint_coords, key=lambda x: x[0])
+                lowest = min(endpoint_coords, key=lambda x: x[0])
+                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - highest))
+                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - lowest))
             
-            if nx.has_path(G, highest_node, lowest_node):
-                main_path = nx.shortest_path(G, source=highest_node, target=lowest_node, weight="weight")
-                
+            if start_node is not None and end_node is not None and nx.has_path(G, start_node, end_node):
+                main_path = nx.shortest_path(G, source=start_node, target=end_node, weight="weight")
                 # prolonger jusqu’aux vraies extrémités
                 main_path = self._extend_path_to_endpoints(G, main_path)
-                
                 main_path_length = sum(
                     np.linalg.norm(np.array(main_path[i]) - np.array(main_path[i-1]))
                     for i in range(1, len(main_path))
@@ -1516,38 +1533,19 @@ class RootVisualizationWidget(QWidget):
         Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
         """
         
-        # --- Grid: show summary + heatmap without overlapping the text ---
+        # --- Grid: add a short summary line (heatmap moved to Heatmap tab) ---
         gl = features.get("grid_lengths", None)
         if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
             try:
-                stats_text += f"""
-        Grid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px
-        """
+                stats_text += f"\nGrid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px\n"
             except Exception:
                 pass
-        
-        # Split the stats area into: top text + bottom heatmap
-        text_ax = ax4.inset_axes([0.02, 0.33, 0.96, 0.65])
-        text_ax.axis('off')
-        text_ax.text(
-            0.0, 1.0, stats_text,
-            transform=text_ax.transAxes,
+        ax4.text(
+            0.02, 0.98, stats_text,
+            transform=ax4.transAxes,
             fontsize=9, verticalalignment='top', fontfamily='monospace',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
         )
-        
-        if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
-            try:
-                heat_ax = ax4.inset_axes([0.10, 0.05, 0.85, 0.23])
-                heat_ax.imshow(gl, aspect='auto', origin='upper')
-                heat_ax.set_title("Grid length heatmap (px)", fontsize=8)
-                heat_ax.set_xticks(range(gl.shape[1]))
-                heat_ax.set_yticks(range(gl.shape[0]))
-                heat_ax.tick_params(axis='both', which='major', labelsize=7)
-                heat_ax.set_xlabel("col", fontsize=7)
-                heat_ax.set_ylabel("row", fontsize=7)
-            except Exception:
-                pass
         self.figure.tight_layout()
         self.canvas.draw()
 
@@ -1623,12 +1621,13 @@ class RootHeatmapWidget(QWidget):
 class RootArchitectureWindow(QMainWindow):
     """Fenêtre optimisée avec paramètres de performance"""
     
-    def __init__(self, parent=None, init_params=None, datasets=None, current_dir=None, output_dir=None):
+    def __init__(self, parent=None, init_params=None, datasets=None, current_dir=None, output_dir=None, screen_size=None):
         super().__init__(parent)
         self.current_df = None
         self.daily_data = {}
         self.worker = None
         
+        self._busy_cm = None
         self.default_params  =  { 'closing_radius': 5,
                                   'closing_shape': cv2.MORPH_RECT,
                                   'min_branch_length': 10.0,
@@ -1647,6 +1646,9 @@ class RootArchitectureWindow(QMainWindow):
         self.current_dataset = None
         self.current_directory = current_dir
         self.output_directory = output_dir
+        self.screen_size = screen_size
+        self.max_analysis_window_size = [2400, 1800]
+        self.analysis_geometry = None
         self.image_extension_list = tuple([os.extsep + ext for ext in ['png', 'jpg', 'tif', 'tiff']])
         
         self.n_max_rows_grid = 12
@@ -1691,6 +1693,13 @@ class RootArchitectureWindow(QMainWindow):
                         _ds.selected = self._dataset_has_root_masks(_ds)
                     except Exception:
                         _ds.selected = False
+        
+        if self.screen_size is not None:
+            self.analysis_geometry = [0, 0, min(int(self.screen_size[0] * 0.9), self.max_analysis_window_size[0]), min(int(self.screen_size[1] * 0.9), self.max_analysis_window_size[1])]
+            self.analysis_geometry[0] = min(100, self.screen_size[0] - self.analysis_geometry[2])
+            self.analysis_geometry[1] = min(100, self.screen_size[1] - self.analysis_geometry[3])
+        
+        
         # Batch state
         self._batch_active = False
         self._batch_all_results = []
@@ -1707,15 +1716,19 @@ class RootArchitectureWindow(QMainWindow):
         
         # --- Taille initiale adaptative ---
         try:
-            screen = QApplication.primaryScreen()
-            geom = screen.availableGeometry() if screen is not None else None
-            sw = int(geom.width()) if geom is not None else 1600
-            sh = int(geom.height()) if geom is not None else 900
-            
-            win_w = min(1600, int(sw * 0.95))
-            win_h = min(900,  int(sh * 0.90))
-            self.setGeometry(50, 50, win_w, win_h)
-            
+            if self.screen_size is None:
+                screen = QApplication.primaryScreen()
+                geom = screen.availableGeometry() if screen is not None else None
+                sw = int(geom.width()) if geom is not None else 1600
+                sh = int(geom.height()) if geom is not None else 900
+                
+                win_w = min(1600, int(sw * 0.95))
+                win_h = min(900,  int(sh * 0.90))
+                self.setGeometry(50, 50, win_w, win_h)
+            else:
+                self.setGeometry(self.analysis_geometry[0], self.analysis_geometry[1], self.analysis_geometry[2], self.analysis_geometry[3])
+                sh = self.analysis_geometry[3]
+                
             # Réduction légère de la police pour les faibles résolutions et garder l'UI lisible
             if sh <= 900:
                 f = self.font()
@@ -2101,17 +2114,51 @@ class RootArchitectureWindow(QMainWindow):
         # Heatmap
         heatmap_tab = QWidget()
         heatmap_layout = QVBoxLayout(heatmap_tab)
+        
+        # Day slider (Heatmap tab) - kept independent from the Visualization tab checkbox logic.
+        heatmap_day_row = QWidget()
+        heatmap_day_control = QHBoxLayout(heatmap_day_row)
+        heatmap_day_control.setContentsMargins(0, 0, 0, 0)
+        heatmap_day_control.setSpacing(8)
+        heatmap_day_control.addWidget(QLabel("Day:"))
+        self.heatmap_day_slider = QSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        self.heatmap_day_slider.setMinimum(0)
+        self.heatmap_day_slider.setMaximum(0)
+        # prevent vertical growth
+        try:
+            from PyQt5.QtWidgets import QSizePolicy as _QSizePolicy5
+            _QSizePolicy = _QSizePolicy5
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QSizePolicy as _QSizePolicy6
+                _QSizePolicy = _QSizePolicy6
+            except Exception:
+                _QSizePolicy = None
+        if _QSizePolicy is not None:
+            if hasattr(_QSizePolicy, 'Policy'):
+                self.heatmap_day_slider.setSizePolicy(_QSizePolicy.Policy.Expanding, _QSizePolicy.Policy.Fixed)
+            else:
+                self.heatmap_day_slider.setSizePolicy(_QSizePolicy.Expanding, _QSizePolicy.Fixed)
+        self.heatmap_day_slider.setFixedHeight(18)
+        # Also constrain the whole row so it doesn't steal vertical space
+        heatmap_day_row.setFixedHeight(26)
+        self.heatmap_day_slider.valueChanged.connect(self._on_heatmap_day_changed)
+        heatmap_day_control.addWidget(self.heatmap_day_slider)
+        self.heatmap_day_label = QLabel("0")
+        heatmap_day_control.addWidget(self.heatmap_day_label)
+        heatmap_layout.addWidget(heatmap_day_row)
+        
         self.heatmap_widget = RootHeatmapWidget()
         heatmap_layout.addWidget(self.heatmap_widget)
+        try:
+            heatmap_layout.setStretch(0, 0)
+            heatmap_layout.setStretch(1, 1)
+        except Exception:
+            pass
         right_panel.addTab(heatmap_tab, "Heatmap")
         
         splitter.addWidget(right_panel)
-        # Proportions plus robuste du splitter pour de faibles résolutions
-        try:
-            left_w = max(300, int(self.width() * 0.32))
-            splitter.setSizes([left_w, max(400, self.width() - left_w)])
-        except Exception:
-            splitter.setSizes([450, 1150])
+        splitter.setSizes([450, 1150])
         
         main_layout.addWidget(splitter)
         self.mask_files = []
@@ -2370,10 +2417,12 @@ class RootArchitectureWindow(QMainWindow):
         self.worker.finished.connect(self.analysis_finished)
         self.worker.error.connect(self.analysis_error)
         
-        self._safe_set_enabled("run_btn", False)
-        self._safe_set_enabled("select_btn", False)
+        self._enter_busy(disable_widgets=[getattr(self, "run_btn", None), getattr(self, "select_btn", None), getattr(self, "batch_btn", None)])
         self.progress_bar.setValue(0)
         self.daily_data.clear()
+        
+        self._stop_requested = False
+        self._safe_set_enabled("stop_btn", True)
         
         self.worker.start()
         self.log("Analysis started...")
@@ -2434,11 +2483,12 @@ class RootArchitectureWindow(QMainWindow):
         self.log(f"🚀 Batch start: {len(self._batch_queue)} datasets")
         
         # désactiver boutons sensibles
-        self._safe_set_enabled("run_btn", False)
-        self._safe_set_enabled("select_btn", False)
+        self._enter_busy(disable_widgets=[getattr(self, "run_btn", None), getattr(self, "select_btn", None)])
         self._safe_set_enabled("export_csv_btn", False)
         self._safe_set_enabled("export_images_btn", False)
         self._safe_set_enabled("batch_btn", False)
+        self._stop_requested = False
+        self._safe_set_enabled("stop_btn", True)
         
         self._batch_start_next()
     
@@ -2494,6 +2544,100 @@ class RootArchitectureWindow(QMainWindow):
         # lance l’analyse normale (asynchrone)
         self.run_analysis()
     
+    def _enter_busy(self, disable_widgets=None):
+        """Enter a long-running 'busy' UI state (for async worker runs).
+        
+        We can't use a normal 'with ui_busy(...)' because the analysis runs in a QThread.
+        So we manually enter/exit the context manager in run_analysis / analysis_finished / analysis_error.
+        """
+        # Close any previous context just in case
+        self._exit_busy()
+        try:
+            self._busy_cm = ui_busy(self, disable_widgets=disable_widgets or [], set_wait_cursor=True)
+            self._busy_cm.__enter__()
+        except Exception:
+            self._busy_cm = None
+    
+    def _exit_busy(self):
+        """Leave busy UI state if active."""
+        if self._busy_cm is None:
+            return
+        
+        try:
+            self._busy_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+        finally:
+            self._busy_cm = None
+            
+            # Safety: fully restore any stacked override cursors (Qt keeps a stack)
+            try:
+                while QApplication.overrideCursor() is not None:
+                    QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+        
+        # ------------------------------------------------------------
+        # Batch orchestration (only if we are actually in batch mode)
+        # ------------------------------------------------------------
+        if not getattr(self, "_batch_running", False):
+            return
+        
+        queue = getattr(self, "_batch_queue", None) or []
+        idx = getattr(self, "_batch_index", 0)
+        
+        # If we're done (or queue empty), finish batch cleanly
+        if idx >= len(queue):
+            # Make sure UI/progress reflects completion
+            try:
+                if hasattr(self, "progress_bar"):
+                    self.progress_bar.setValue(100)
+            except Exception:
+                pass
+            
+            self._batch_running = False
+            self._batch_current = None
+            
+            # Optional: reset index so a new batch can start cleanly
+            self._batch_index = len(queue)
+            
+            # Show completion popup (if you want it here)
+            try:
+                QMessageBox.information(self, "Batch terminé",
+                                        f"Traitement batch terminé ({len(queue)} dataset(s)).")
+            except Exception:
+                pass
+            
+            self.log(f"✅ Batch terminé ({len(queue)} dataset(s))")
+            return
+        
+        # Normal case: start next dataset
+        ds_name = queue[idx]
+        self._batch_current = ds_name
+        self._batch_index = idx + 1
+        
+        # sélectionner le dataset (widget)
+        if hasattr(self, 'dataset_selector'):
+            self.dataset_selector.set_viewing_dataset(ds_name, emit_signal=True)
+        else:
+            # fallback: remplir mask_files directement
+            seg_dir = self.datasets[ds_name].segmented_directory['roots']
+            file_extension = tuple([os.extsep + ext for ext in ['png', 'jpg', 'tif', 'tiff']])
+            self.mask_files = sorted([
+                os.path.join(seg_dir, f)
+                for f in os.listdir(seg_dir)
+                if f.lower().endswith(file_extension)
+            ])
+            self.current_dataset = ds_name
+        
+        self.daily_data = {}
+        self.current_df = None
+        
+        self.log(f"▶ Analyse: {ds_name} ({self._batch_index}/{len(queue)})")
+        
+        # lance l’analyse normale (asynchrone)
+        self.run_analysis()
+    
     def update_progress(self, value, message):
         self._safe_set_value("progress_bar", value)
         self._safe_set_text("status_label", message)
@@ -2507,9 +2651,27 @@ class RootArchitectureWindow(QMainWindow):
             self.day_slider.setMinimum(min(days))
             self.day_slider.setMaximum(max(days))
             self.day_slider.setValue(min(days))
+            
+            # Keep heatmap day slider in sync (range + initial value)
+            if hasattr(self, 'heatmap_day_slider') and self.heatmap_day_slider is not None:
+                try:
+                    self.heatmap_day_slider.blockSignals(True)
+                    self.heatmap_day_slider.setMinimum(min(days))
+                    self.heatmap_day_slider.setMaximum(max(days))
+                    self.heatmap_day_slider.setValue(min(days))
+                finally:
+                    self.heatmap_day_slider.blockSignals(False)
+                if hasattr(self, 'heatmap_day_label') and self.heatmap_day_label is not None:
+                    self.heatmap_day_label.setText(str(min(days)))
         else:
             days = sorted(self.daily_data.keys())
             self.day_slider.setMaximum(max(days))
+            if hasattr(self, 'heatmap_day_slider') and self.heatmap_day_slider is not None:
+                try:
+                    self.heatmap_day_slider.blockSignals(True)
+                    self.heatmap_day_slider.setMaximum(max(days))
+                finally:
+                    self.heatmap_day_slider.blockSignals(False)
     
     def update_day_visualization(self):
         """Met à jour la visualisation pour le jour le plus proche ayant des données.
@@ -2536,25 +2698,60 @@ class RootArchitectureWindow(QMainWindow):
         day = closest_day
         self.day_label.setText(str(day))
         
+        # Keep Heatmap day slider/label synchronized with the effective day.
+        if hasattr(self, 'heatmap_day_slider') and self.heatmap_day_slider is not None:
+            try:
+                self.heatmap_day_slider.blockSignals(True)
+                self.heatmap_day_slider.setMinimum(min(available_days))
+                self.heatmap_day_slider.setMaximum(max(available_days))
+                self.heatmap_day_slider.setValue(day)
+            finally:
+                self.heatmap_day_slider.blockSignals(False)
+        if hasattr(self, 'heatmap_day_label') and self.heatmap_day_label is not None:
+            self.heatmap_day_label.setText(str(day))
+        
         features, original, merged = self.daily_data[day]
         self.viz_widget.set_day_data(day, features, original, merged, dataset=self.current_dataset)
+        if hasattr(self, 'heatmap_widget') and self.heatmap_widget is not None:
+            self.heatmap_widget.set_day_data(day, features, dataset=self.current_dataset)
+    
+    
+    def _on_heatmap_day_changed(self, value):
+        """When the Heatmap tab slider changes, drive the main day slider.
+        
+        The main day slider owns the 'snap to closest available day' logic via update_day_visualization().
+        """
+        if not self.daily_data:
+            return
+        if hasattr(self, 'day_slider') and self.day_slider is not None:
+            try:
+                self.day_slider.blockSignals(True)
+                self.day_slider.setValue(int(value))
+            finally:
+                self.day_slider.blockSignals(False)
+        # Apply snap + refresh
+        self.update_day_visualization()
+    
     
     def analysis_finished(self, df):
+        # Ensure cursor/UI updates from worker signals settle
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        
         # Post-traitement du DataFrame : ajout d'une colonne de racines cumulatives
         if df is not None and not df.empty:
-            # Tri indispensable pour une cinétique propre
             sort_cols = [c for c in ['modality', 'day'] if c in df.columns]
             if sort_cols:
                 df = df.sort_values(sort_cols)
             
-            # Éviter les doublons (souvent causés par des chemins de fichiers dupliqués)
             subset_cols = [c for c in ['dataset','filename','day','modality'] if c in df.columns]
             if subset_cols:
                 df = df.drop_duplicates(subset=subset_cols, keep='first')
             else:
                 df = df.drop_duplicates(keep='first')
             
-            # Helper: ajoute une colonne cummax par modalité (ou global si pas de modality)
             def add_cummax(col_name: str, out_name: str):
                 if col_name not in df.columns:
                     return
@@ -2562,15 +2759,33 @@ class RootArchitectureWindow(QMainWindow):
                     df[out_name] = df.groupby('modality')[col_name].cummax()
                 else:
                     df[out_name] = df[col_name].cummax()
-                # éviter les NaN si jamais
                 df[out_name] = df[out_name].fillna(0).astype(int)
             
-            # Cumulatifs non décroissants
             add_cummax('root_count', 'root_count_cum')
             add_cummax('root_count_raw', 'root_count_raw_cum')
             add_cummax('root_count_attach', 'root_count_attach_cum')
         
         self.current_df = df
+        
+        # Refresh UI after state changes (helpful if user is on other tabs)
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        
+        # Make sure both day sliders have a valid range (helps when analysis ends while user stays on Heatmap tab)
+        if getattr(self, 'daily_data', None):
+            try:
+                days = sorted(self.daily_data.keys())
+                if days:
+                    dmin, dmax = min(days), max(days)
+                    self.day_slider.setMinimum(dmin)
+                    self.day_slider.setMaximum(dmax)
+                    if hasattr(self, 'heatmap_day_slider') and self.heatmap_day_slider is not None:
+                        self.heatmap_day_slider.setMinimum(dmin)
+                        self.heatmap_day_slider.setMaximum(dmax)
+            except Exception:
+                pass
         
         # --------------------
         # Batch mode: auto-export + next dataset
@@ -2610,10 +2825,16 @@ class RootArchitectureWindow(QMainWindow):
             self.populate_results_table(self.current_df)
             self.update_plot()
             self.update_day_visualization()
-            # Forcer le repaint (utile en batch)
             QApplication.processEvents()
             
-            # enchaîner le dataset suivant (laisser la boucle d'événements respirer)
+            # ✅ quitter busy maintenant que tout (DF + export + UI) est fait
+            self._exit_busy()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+            
+            # enchaîner le dataset suivant
             QTimer.singleShot(0, self._batch_start_next)
             return
         
@@ -2638,13 +2859,35 @@ class RootArchitectureWindow(QMainWindow):
         )
     
     def analysis_error(self, error_msg):
+        # Always leave busy state
+        self._exit_busy()
+        self._safe_set_enabled("stop_btn", False)
         self._safe_set_enabled("run_btn", True)
         self._safe_set_enabled("select_btn", True)
-        self.log(f"❌ ERROR: {error_msg}")
+        self._safe_set_enabled("batch_btn", True)
         
+        # Detect user cancellation
+        msg = str(error_msg)
+        msg_lower = msg.lower()
+        is_cancel = bool(getattr(self, "_stop_requested", False)) or ("stopped by user" in msg_lower) or ("interrupted" in msg_lower) or ("stop requested" in msg_lower) or ("cancel" in msg_lower) or ("aborted" in msg_lower)
+        
+        if is_cancel:
+            self.log("⛔ Analysis stopped.")
+            try:
+                self.progress_bar.setValue(0)
+            except Exception:
+                pass
+            self.status_label.setText("Stopped")
+            # Ensure batch is not left active
+            self._batch_active = False
+            QMessageBox.information(self, "Analysis", "⛔ Analysis stopped by user.")
+            return
+        
+        # Normal error
+        self.log(f"❌ ERROR: {msg}")
         QMessageBox.critical(
             self, "Analysis error:",
-            f"An error has occurred:\n{error_msg}"
+            f"An error has occurred:\n{msg}"
         )
     
     def populate_results_table(self, df):
