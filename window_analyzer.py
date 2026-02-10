@@ -54,7 +54,7 @@ from pathlib import Path
 from widgets import DatasetSelectionWidget
 
 from skimage import morphology, measure, draw, io
-from skimage.morphology import skeletonize, convex_hull_image, closing, disk
+from skimage.morphology import skeletonize, thin, convex_hull_image, closing, disk
 
 from scipy.ndimage import convolve, center_of_mass
 from scipy.spatial import cKDTree
@@ -492,7 +492,23 @@ class RootArchitectureAnalyzer:
         
         
         # Squelettisation
-        skeleton = skeletonize(binary_mask.astype(bool))
+        # IMPORTANT:
+        # - skimage.skeletonize() (Zhang-Suen) a un comportement surprenant sur certains objets
+        #   déjà très fins (ex: bande diagonale de 2px), pouvant "s'effondrer" en un seul pixel.
+        # - Dans ces cas, thin() (amincissement) est beaucoup plus stable.
+        # On fait donc un fallback automatique si le squelette est anormalement petit.
+        mask_bool = binary_mask.astype(bool)
+        skeleton = skeletonize(mask_bool)
+        
+        try:
+            # Heuristique: si le squelette est trop petit par rapport au masque, on fallback
+            msum = int(mask_bool.sum())
+            ssum = int(skeleton.sum())
+            if msum > 0 and ssum < max(2, int(0.01 * msum)):
+                skeleton = thin(mask_bool)
+        except Exception:
+            # En cas de souci d'import/compatibilité, on garde skeletonize()
+            pass
         skeleton_points = np.array(np.nonzero(skeleton)).T
         
         if len(skeleton_points) == 0:
@@ -1296,7 +1312,6 @@ class RootArchitectureWorker(QThread):
                     **{k: v for k, v in features.items()
                        if not isinstance(v, np.ndarray)}
                 }
-                results.append(row)
                 
                 # --- Grid lengths: flatten to scalar columns for CSV/DataFrame ---
                 gl = features.get("grid_lengths", None)
