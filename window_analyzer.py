@@ -661,8 +661,29 @@ class RootArchitectureAnalyzer:
                 ref_top = np.asarray(ref_top, dtype=float)
                 ref_bottom = np.asarray(ref_bottom, dtype=float)
                 
-                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
-                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
+                # AMÉLIORATION : Chercher les nœuds les plus proches en combinant
+                # (1) distance aux extrémités ET (2) proximité au chemin de référence
+                if main_ref_path is not None and node_dist is not None:
+                    # Normaliser les distances au chemin (0 = sur le chemin, 1 = très loin)
+                    max_path_dist = max(node_dist.values()) or 1.0
+                    
+                    def score_node_for_endpoint(n, ref_point):
+                        """Score combiné : distance à l'extrémité + distance au chemin"""
+                        n_arr = np.array(n, dtype=float)
+                        # Distance euclidienne à l'extrémité de référence
+                        dist_to_endpoint = np.linalg.norm(n_arr - ref_point)
+                        # Distance au chemin de référence (normalisée)
+                        dist_to_path = node_dist[n] / max_path_dist
+                        # Score combiné (pondération : 40% endpoint, 60% chemin)
+                        # Plus le score est petit, mieux c'est
+                        return 0.4 * dist_to_endpoint + 0.6 * dist_to_path * max_path_dist
+                    
+                    start_node = min(G.nodes, key=lambda n: score_node_for_endpoint(n, ref_top))
+                    end_node = min(G.nodes, key=lambda n: score_node_for_endpoint(n, ref_bottom))
+                else:
+                    # Fallback : ancienne méthode (seulement distance aux extrémités)
+                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
+                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
                 
                 if nx.has_path(G, start_node, end_node):
                     # si on a un biais (main_ref_path), on l'utilise
@@ -744,7 +765,7 @@ class RootArchitectureAnalyzer:
                     protect_mask[yy, xx] = True
             
             # seuil en pixels de la résolution actuelle (comme pour tes branches)
-            prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
+            prune_len_px = max(1, int(round(self.min_branch_length * self.analysis_scale)))
             
             skeleton_pruned = prune_terminal_spurs(
                 skeleton,
@@ -1130,7 +1151,7 @@ class RootArchitectureWorker(QThread):
         # Créer l'analyseur avec les paramètres d'optimisation
         self.analyzer = RootArchitectureAnalyzer(
             max_image_size=params.get('max_image_size', 2000),
-            min_branch_length=params.get('min_branch_length', 10.0),
+            min_branch_length=params.get('min_branch_length', 20.0),
             max_skeleton_size=params.get('min_sampling_threshold', 100000),
             connection_sample_rate=params.get('connection_sample_rate', 0.05),
             main_path_bias=params.get('main_path_bias', 20.0),
@@ -1809,9 +1830,9 @@ class RootArchitectureWindow(QMainWindow):
         self._busy_cm = None
         self.default_params  =  { 'closing_radius': 5,
                                   'closing_shape': cv2.MORPH_RECT,
-                                  'min_branch_length': 10.0,
+                                  'min_branch_length': 20.0,
                                   'min_object_size': 500,
-                                  'max_connection_dst': 80,
+                                  'max_connection_dst': 180,
                                   'line_thickness': 5,
                                   'temporal_merge': True,
                                   'connect_objects': True,
@@ -2035,7 +2056,7 @@ class RootArchitectureWindow(QMainWindow):
         min_branch_layout.addWidget(QLabel("Minimum branch size:"))
         self.min_branch_length_spin = QDoubleSpinBox()
         self.min_branch_length_spin.setRange(0.0, 100000.0)
-        self.min_branch_length_spin.setValue(10.0)
+        self.min_branch_length_spin.setValue(20.0)
         self.min_branch_length_spin.setDecimals(2)
         min_branch_layout.addWidget(self.min_branch_length_spin)
         params_layout.addLayout(min_branch_layout)
@@ -2052,7 +2073,7 @@ class RootArchitectureWindow(QMainWindow):
         max_connection_dst_layout.addWidget(QLabel("Maximum connection distance:"))
         self.max_connection_dst_spin = QSpinBox()
         self.max_connection_dst_spin.setRange(0, 2000)
-        self.max_connection_dst_spin.setValue(80)
+        self.max_connection_dst_spin.setValue(180)
         max_connection_dst_layout.addWidget(self.max_connection_dst_spin)
         params_layout.addLayout(max_connection_dst_layout)
         
@@ -2682,6 +2703,7 @@ class RootArchitectureWindow(QMainWindow):
         # Désactiver les widgets pendant l'analyse
         widgets_to_disable = [
             getattr(self, "run_btn", None),
+            getattr(self, "batch_btn", None),
             getattr(self, "select_btn", None),
             getattr(self, "dataset_selector", None),
             getattr(self, "dataset_selection_widget", None),
@@ -2767,6 +2789,7 @@ class RootArchitectureWindow(QMainWindow):
         # désactiver boutons sensibles et dataset selector
         widgets_to_disable = [
             getattr(self, "run_btn", None),
+            getattr(self, "batch_btn", None),
             getattr(self, "select_btn", None),
             getattr(self, "dataset_selector", None),
             getattr(self, "dataset_selection_widget", None),
@@ -2774,7 +2797,7 @@ class RootArchitectureWindow(QMainWindow):
         ]
         
         # désactiver boutons sensibles
-        self._enter_busy(disable_widgets=[getattr(self, "run_btn", None), getattr(self, "select_btn", None)])
+        self._enter_busy(disable_widgets=widgets_to_disable)
         self._safe_set_enabled("export_csv_btn", False)
         self._safe_set_enabled("export_images_btn", False)
         self._safe_set_enabled("batch_btn", False)
@@ -3212,6 +3235,12 @@ class RootArchitectureWindow(QMainWindow):
             QTimer.singleShot(0, self._batch_start_next)
             return
         
+        self._exit_busy()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        
         self._analysis_dataset = None
         
         self._safe_set_enabled("export_csv_btn", True)
@@ -3239,6 +3268,18 @@ class RootArchitectureWindow(QMainWindow):
         self._safe_set_enabled("run_btn", True)
         self._safe_set_enabled("select_btn", True)
         self.log(f"❌ ERROR: {error_msg}")
+        
+        self._exit_busy()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        
+        # Remise de la barre de progression à 0%
+        try:
+            self.progress_bar.setValue(0)
+        except Exception:
+            pass
         
         QMessageBox.critical(
             self, "Analysis error:",
