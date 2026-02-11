@@ -1647,6 +1647,34 @@ class RootHeatmapWidget(QWidget):
         self.unit_combo.setCurrentIndex(0)
         self.unit_combo.currentIndexChanged.connect(self.update_view)
         ctrl.addWidget(self.unit_combo)
+        
+        ctrl.addSpacing(20)
+        
+        ctrl.addWidget(QLabel("Palette:"))
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems([
+            "YlOrRd",      # Jaune -> Orange -> Rouge
+            "viridis",     # Bleu -> Vert -> Jaune
+            "plasma",      # Violet -> Rose -> Jaune
+            "inferno",     # Noir -> Violet -> Jaune
+            "Blues",       # Blanc -> Bleu foncé
+            "Greens",      # Blanc -> Vert foncé
+            "Reds",        # Blanc -> Rouge foncé
+            "YlGn",        # Jaune -> Vert
+            "RdYlGn",      # Rouge -> Jaune -> Vert
+            "coolwarm",    # Bleu -> Blanc -> Rouge
+        ])
+        self.cmap_combo.setCurrentIndex(0)  # YlOrRd par défaut
+        self.cmap_combo.currentIndexChanged.connect(self.update_view)
+        ctrl.addWidget(self.cmap_combo)
+        
+        ctrl.addSpacing(20)
+        
+        # Option pour inverser la colormap
+        self.invert_cmap_check = QCheckBox("Inverser")
+        self.invert_cmap_check.stateChanged.connect(self.update_view)
+        ctrl.addWidget(self.invert_cmap_check)
+        
         ctrl.addStretch()
         layout.addLayout(ctrl)
         
@@ -1672,22 +1700,45 @@ class RootHeatmapWidget(QWidget):
         key = "grid_lengths_cm" if use_cm else "grid_lengths"
         gl = features.get(key, None)
         
+        # Récupérer la colormap sélectionnée
+        cmap_name = self.cmap_combo.currentText()
+        if self.invert_cmap_check.isChecked():
+            cmap_name += "_r"  # Version inversée
+        
         self.figure.clear()
         ax = self.figure.add_subplot(1, 1, 1)
         
         if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
-            ax.imshow(gl, aspect="auto", origin="upper")
+            # Afficher la heatmap avec la colormap sélectionnée
+            im = ax.imshow(gl, aspect="auto", origin="upper", cmap=cmap_name, interpolation="nearest")
+            
+            # Ajouter une barre de légende (colorbar)
+            cbar = self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label(f"Longueur ({'cm' if use_cm else 'px'})", rotation=270, labelpad=15)
+            
             ax.set_title(f"Grid length heatmap ({'cm' if use_cm else 'px'}) - J{day} - {dataset}")
             ax.set_xticks(range(gl.shape[1]))
             ax.set_yticks(range(gl.shape[0]))
             ax.set_xlabel("col")
             ax.set_ylabel("row")
+            
             # Annoter chaque cellule (lisible tant que petite grille)
             try:
                 if gl.shape[0] <= 12 and gl.shape[1] <= 12:
+                    # Déterminer la couleur du texte selon la luminosité de fond
+                    vmin = gl.min()
+                    vmax = gl.max()
+                    threshold = vmin + (vmax - vmin) * 0.5  # seuil à 50% de la plage
+                    
                     for i in range(gl.shape[0]):
                         for j in range(gl.shape[1]):
-                            ax.text(j, i, f"{gl[i, j]:.1f}", ha="center", va="center", fontsize=7)
+                            # Texte blanc sur fond foncé, noir sur fond clair
+                            text_color = 'white' if gl[i, j] > threshold else 'black'
+                            ax.text(j, i, f"{gl[i, j]:.1f}", 
+                                   ha="center", va="center", 
+                                   fontsize=8, 
+                                   color=text_color,
+                                   weight='bold')
             except Exception:
                 pass
         else:
