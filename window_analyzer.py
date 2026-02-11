@@ -431,6 +431,49 @@ class RootArchitectureAnalyzer:
         return current_mask
     
     
+    def _compute_exact_skeleton_length(self, skeleton_bool):
+        """
+        Calcule la longueur exacte du squelette en pixels en parcourant tous les segments.
+        Utilise la 8-connectivité avec distances euclidiennes exactes.
+        
+        Returns:
+            float: Longueur totale du squelette en pixels
+        """
+        if skeleton_bool is None or skeleton_bool.size == 0:
+            return 0.0
+        
+        h, w = skeleton_bool.shape[:2]
+        if h == 0 or w == 0:
+            return 0.0
+        
+        ys, xs = np.nonzero(skeleton_bool)
+        if ys.size == 0:
+            return 0.0
+        
+        total_length = 0.0
+        
+        # Parcourir tous les pixels du squelette
+        # Pour éviter de compter deux fois les mêmes arêtes, on ne regarde que
+        # les voisins vers la droite et le bas (comme dans _grid_edge_lengths_from_skeleton)
+        neighbors = [
+            (0, 1, 1.0),              # droite
+            (1, 0, 1.0),              # bas
+            (1, 1, math.sqrt(2.0)),   # diagonale bas-droite
+            (1, -1, math.sqrt(2.0))   # diagonale bas-gauche
+        ]
+        
+        for y, x in zip(ys.tolist(), xs.tolist()):
+            for dy, dx, seg_len in neighbors:
+                ny = y + dy
+                nx = x + dx
+                if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                    continue
+                if not skeleton_bool[ny, nx]:
+                    continue
+                total_length += seg_len
+        
+        return total_length
+    
     def _grid_edge_lengths_from_skeleton(self, skeleton_bool, grid_rows, grid_cols):
         """Compute skeleton length per grid cell (grid_rows x grid_cols).
         
@@ -518,6 +561,11 @@ class RootArchitectureAnalyzer:
         
         if len(skeleton_points) == 0:
             return self._empty_features()
+        
+        # CALCUL DE LA LONGUEUR EXACTE DU SQUELETTE AVANT ÉCHANTILLONNAGE
+        # Cela donne la vraie longueur sans biais d'échantillonnage
+        exact_skeleton_length = self._compute_exact_skeleton_length(skeleton.astype(bool))
+        self.log(f"Exact skeleton length (pre-sampling): {exact_skeleton_length:.2f} px")
         
         
         # Détection des extrémités (optimisée)
@@ -730,9 +778,6 @@ class RootArchitectureAnalyzer:
             return float(seg_lengths.sum())
         
         if self.min_branch_length > 0:
-            # self.min_branch_length est exprimé en "pixels de l'image d'origine".
-            # Comme on a éventuellement redimensionné l'image avec self.scale_factor,
-            # on corrige le seuil pour la résolution actuelle :
             length_threshold_resized = self.min_branch_length * self.analysis_scale
             filtered_branches = []
             for br in secondary_branches:
@@ -834,6 +879,7 @@ class RootArchitectureAnalyzer:
             'main_root_length': main_path_length * scale,
             'secondary_roots_length': secondary_length * scale,
             'total_root_length': (main_path_length + secondary_length) * scale,
+            'exact_skeleton_length': exact_skeleton_length * scale,  # NOUVELLE MÉTRIQUE EXACTE
             'branch_count': branch_count,
             'root_count_attach': root_count_attach,
             'endpoint_count_raw': endpoint_count_raw,
@@ -874,6 +920,7 @@ class RootArchitectureAnalyzer:
             result['main_root_length_cm'] = result['main_root_length'] / self.pixels_per_cm
             result['secondary_roots_length_cm'] = result['secondary_roots_length'] / self.pixels_per_cm
             result['total_root_length_cm'] = result['total_root_length'] / self.pixels_per_cm
+            result['exact_skeleton_length_cm'] = result['exact_skeleton_length'] / self.pixels_per_cm  # NOUVELLE MÉTRIQUE
             result['convex_hull_cm'] = result['convex_hull'] / (self.pixels_per_cm ** 2)
             result['convex_area_cm'] = result['convex_area'] / (self.pixels_per_cm ** 2)
         
@@ -1562,7 +1609,8 @@ class RootVisualizationWidget(QWidget):
         
         Main root length: {features['main_root_length']:.1f} px
         Secondary roots length: {features['secondary_roots_length']:.1f} px
-        Total length: {features['total_root_length']:.1f} px
+        Total length (graph): {features['total_root_length']:.1f} px
+        Exact skeleton length: {features.get('exact_skeleton_length', 0):.1f} px
         
         Number of branches: {features['branch_count']}
         Number of end points without pruning: {features['endpoint_count_raw']}
@@ -2463,20 +2511,26 @@ class RootArchitectureWindow(QMainWindow):
                 if self.daily_data:
                     days = sorted(self.daily_data.keys())
                     dmin, dmax = min(days), max(days)
-                    self.day_slider.setMinimum(dmin)
-                    self.day_slider.setMaximum(dmax)
-                    cur = self.day_slider.value()
-                    if cur < dmin or cur > dmax:
-                        cur = dmin
-                        self.day_slider.setValue(cur)
-                    self.day_label.setText(str(cur))
+                    # When switching dataset for visualization, always reset to the first available day
+                    try:
+                        self.day_slider.blockSignals(True)
+                        self.day_slider.setMinimum(dmin)
+                        self.day_slider.setMaximum(dmax)
+                        self.day_slider.setValue(dmin)
+                    finally:
+                        self.day_slider.blockSignals(False)
+                    self.day_label.setText(str(dmin))
                     # Heatmap slider if present
                     if hasattr(self, "heatmap_day_slider") and self.heatmap_day_slider is not None:
-                        self.heatmap_day_slider.setMinimum(dmin)
-                        self.heatmap_day_slider.setMaximum(dmax)
-                        hcur = self.heatmap_day_slider.value()
-                        if hcur < dmin or hcur > dmax:
-                            self.heatmap_day_slider.setValue(cur)
+                        try:
+                            self.heatmap_day_slider.blockSignals(True)
+                            self.heatmap_day_slider.setMinimum(dmin)
+                            self.heatmap_day_slider.setMaximum(dmax)
+                            self.heatmap_day_slider.setValue(dmin)
+                        finally:
+                            self.heatmap_day_slider.blockSignals(False)
+                        if hasattr(self, "heatmap_day_label") and self.heatmap_day_label is not None:
+                            self.heatmap_day_label.setText(str(dmin))
                     self.update_day_visualization()
             except Exception:
                 pass
@@ -2506,10 +2560,25 @@ class RootArchitectureWindow(QMainWindow):
         
         if days:
             dmin, dmax = min(days), max(days)
-            self.day_slider.setMinimum(dmin)
-            self.day_slider.setMaximum(dmax)
-            self.day_slider.setValue(dmin)
+            try:
+                self.day_slider.blockSignals(True)
+                self.day_slider.setMinimum(dmin)
+                self.day_slider.setMaximum(dmax)
+                self.day_slider.setValue(dmin)
+            finally:
+                self.day_slider.blockSignals(False)
             self.day_label.setText(str(dmin))
+            # Keep Heatmap slider/label consistent even when there is no cached analysis yet.
+            if hasattr(self, "heatmap_day_slider") and self.heatmap_day_slider is not None:
+                try:
+                    self.heatmap_day_slider.blockSignals(True)
+                    self.heatmap_day_slider.setMinimum(dmin)
+                    self.heatmap_day_slider.setMaximum(dmax)
+                    self.heatmap_day_slider.setValue(dmin)
+                finally:
+                    self.heatmap_day_slider.blockSignals(False)
+                if hasattr(self, "heatmap_day_label") and self.heatmap_day_label is not None:
+                    self.heatmap_day_label.setText(str(dmin))
             self.update_day_visualization()
         else:
             self.day_slider.setMinimum(0)
@@ -2610,6 +2679,16 @@ class RootArchitectureWindow(QMainWindow):
         self.worker.finished.connect(self.analysis_finished)
         self.worker.error.connect(self.analysis_error)
         
+        # Désactiver les widgets pendant l'analyse
+        widgets_to_disable = [
+            getattr(self, "run_btn", None),
+            getattr(self, "select_btn", None),
+            getattr(self, "dataset_selector", None),
+            getattr(self, "dataset_selection_widget", None),
+            getattr(self, "only_segmented_check", None)
+        ]
+        self._enter_busy(disable_widgets=[w for w in widgets_to_disable if w is not None])
+        
         self._safe_set_enabled("run_btn", False)
         self._safe_set_enabled("select_btn", False)
         self.progress_bar.setValue(0)
@@ -2684,6 +2763,15 @@ class RootArchitectureWindow(QMainWindow):
         self._batch_current = None
         
         self.log(f"🚀 Batch start: {len(self._batch_queue)} datasets")
+        
+        # désactiver boutons sensibles et dataset selector
+        widgets_to_disable = [
+            getattr(self, "run_btn", None),
+            getattr(self, "select_btn", None),
+            getattr(self, "dataset_selector", None),
+            getattr(self, "dataset_selection_widget", None),
+            getattr(self, "only_segmented_check", None)
+        ]
         
         # désactiver boutons sensibles
         self._enter_busy(disable_widgets=[getattr(self, "run_btn", None), getattr(self, "select_btn", None)])
@@ -3328,7 +3416,8 @@ class RootArchitectureWindow(QMainWindow):
                 f"Dataset: {self.current_dataset}\n\n"
                 f"Main root length: {features['main_root_length']:.1f} px\n"
                 f"Secondary roots length: {features['secondary_roots_length']:.1f} px\n"
-                f"Total length: {features['total_root_length']:.1f} px\n\n"
+                f"Total length (graph): {features['total_root_length']:.1f} px\n"
+                f"Exact skeleton length: {features.get('exact_skeleton_length', 0):.1f} px\n\n"
                 f"Number of branches: {features['branch_count']}\n"
                 f"Number of end points without pruning: {features['endpoint_count_raw']}\n"
                 f"Number of roots without pruning: {features['root_count_raw']}\n"
