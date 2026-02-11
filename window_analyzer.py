@@ -49,6 +49,7 @@ import tifffile as tiff
 from collections import deque
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.patches import FancyBboxPatch
 from pathlib import Path
 
 from widgets import DatasetSelectionWidget
@@ -294,6 +295,7 @@ class RootArchitectureAnalyzer:
         self.max_skeleton_size = max_skeleton_size
         self.connection_sample_rate = connection_sample_rate
         self.scale_factor = 1.0
+        self.analysis_scale = 1.0
         
         # Attraction vers la racine principale du dernier jour
         self.main_path_bias = main_path_bias # force de la pénalisation
@@ -315,6 +317,7 @@ class RootArchitectureAnalyzer:
     def resize_if_needed(self, image):
         """Redimensionne l'image si trop grande"""
         if self.max_image_size <= 0:
+            self.analysis_scale = 1.0
             self.scale_factor = 1.0
             return image
         
@@ -322,13 +325,15 @@ class RootArchitectureAnalyzer:
         max_dim = max(h, w)
         
         if max_dim > self.max_image_size:
-            self.scale_factor = self.max_image_size / max_dim
-            new_h = int(h * self.scale_factor)
-            new_w = int(w * self.scale_factor)
+            self.analysis_scale = self.max_image_size / max_dim
+            self.scale_factor = self.analysis_scale
+            new_h = int(h * self.analysis_scale)
+            new_w = int(w * self.analysis_scale)
             resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-            self.log(f"Image resizing: {w}x{h} -> {new_w}x{new_h} (factor: {self.scale_factor:.2f})")
+            self.log(f"Image resizing: {w}x{h} -> {new_w}x{new_h} (factor: {self.analysis_scale:.2f})")
             return resized
         
+        self.analysis_scale = 1.0
         self.scale_factor = 1.0
         return image
     
@@ -1100,7 +1105,7 @@ class RootArchitectureWorker(QThread):
                         raise InterruptedError("Stopped by user")
                 except AttributeError:
                     return
-
+            
             # ----------------------------
             # 1) Pré-traitement de tous les jours
             # ----------------------------
@@ -1124,7 +1129,7 @@ class RootArchitectureWorker(QThread):
                     # Safety checks
                     if mask.ndim != 2:
                         raise ValueError(f"Mask must be 2D after conversion, got ndim={mask.ndim} for {mask_file}")
-
+                    
                 else:
                     mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
                     if mask is None:
@@ -1159,19 +1164,32 @@ class RootArchitectureWorker(QThread):
                     merged_mask = binary_mask.copy()
                 
                 # Prétraitement morphologique
+                # Scale pixel-based parameters to keep behavior consistent when images are resized
+                sf = getattr(self.analyzer, "scale_factor", 1.0) or 1.0
+                closing_r = max(1, int(round(self.params['closing_radius'] * sf)))
+                # Areas scale ~ sf^2
+                min_size = max(1, int(round(self.params['min_object_size'] * (sf * sf))))
+                
                 processed = self.analyzer.preprocess_mask(
                     merged_mask,
-                    closing_radius=self.params['closing_radius'],
-                    min_size=self.params['min_object_size']
+                    closing_radius=closing_r,
+                    min_size=min_size
                 )
                 
                 # Connexion des objets (optionnel)
                 if self.params['connect_objects']:
+                    # Keep connection parameters consistent under resizing
+                    sf = getattr(self.analyzer, "scale_factor", 1.0) or 1.0
+                    lt = max(1, int(round(self.params['line_thickness'] * sf)))
+                    mcd = self.params.get('max_connection_dst', None)
+                    if mcd is not None:
+                        mcd = max(1, int(round(mcd * sf)))
+                    
                     processed = self.analyzer.merge_and_connect_objects(
                         processed,
-                        line_thickness=self.params['line_thickness'],
+                        line_thickness=lt,
                         max_iterations=self.params.get('max_connect_iterations', 10),
-                        max_connection_distance=self.params.get('max_connection_dst', None)
+                        max_connection_distance=mcd
                     )
                 
                 preprocessed.append({
@@ -1522,6 +1540,22 @@ class RootVisualizationWidget(QWidget):
         
         # 4. Statistiques
         ax4.axis('off')
+        
+        # --- Responsive rendering for the stats panel ---
+        # Small screens: keep text compact, smaller font.
+        # Large screens: more readable font + multi-line grid stats.
+        try:
+            canvas_w = int(self.canvas.width())
+        except Exception:
+            canvas_w = 0
+        compact_view = (canvas_w > 0 and canvas_w < 1100)
+        if canvas_w >= 1800:
+            stats_fs = 10
+        elif canvas_w >= 1400:
+            stats_fs = 9
+        else:
+            stats_fs = 7 if compact_view else 8
+        
         stats_text = f"""
         Day {day}
         Dataset: {dataset}
@@ -1552,18 +1586,49 @@ class RootVisualizationWidget(QWidget):
         gl = features.get("grid_lengths", None)
         if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
             try:
-                stats_text += f"\nGrid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px\n"
+                gmin, gmean, gmax = float(np.min(gl)), float(np.mean(gl)), float(np.max(gl))
+                if compact_view:
+                    stats_text += f"""
+        Grid ({gl.shape[0]}x{gl.shape[1]}): {gmin:.2f}/{gmean:.2f}/{gmax:.2f} px
+        """
+                else:
+                    stats_text += f"""
+        Grid per cell ({gl.shape[0]}x{gl.shape[1]}):
+            - Min:  {gmin:.2f} px
+            - Mean: {gmean:.2f} px
+            - Max:  {gmax:.2f} px
+        """
             except Exception:
                 pass
+        
+        # Background filling the whole panel (so it's not a tiny centered box)
+        try:
+            bg = FancyBboxPatch(
+                (0.0, 0.0), 1.0, 1.0,
+                transform=ax4.transAxes,
+                boxstyle="round,pad=0.02",
+                facecolor="wheat",
+                edgecolor="none",
+                alpha=0.35,
+                zorder=0,
+            )
+            ax4.add_patch(bg)
+        except Exception:
+            pass
+        
         ax4.text(
-            0.02, 0.98, stats_text,
+            0.03, 0.97, stats_text,
             transform=ax4.transAxes,
-            fontsize=9, verticalalignment='top', fontfamily='monospace',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+            fontsize=stats_fs,
+            verticalalignment='top',
+            horizontalalignment='left',
+            fontfamily='monospace',
+            wrap=True,
+            zorder=1,
         )
+        
         self.figure.tight_layout()
         self.canvas.draw()
-
 
 class RootHeatmapWidget(QWidget):
     """Affiche la heatmap des longueurs par cellule de grille (grid_lengths / grid_lengths_cm)."""
@@ -1724,7 +1789,10 @@ class RootArchitectureWindow(QMainWindow):
         self._batch_running = False
         self._batch_total = 0
         self._stop_requested = False
-    
+        # Cache results per dataset so switching datasets refreshes the visuals instantly
+        self._results_cache = {}
+        
+        self._analysis_dataset = None
     
     def init_ui(self):
         self.setWindowTitle("Root Architectural Analysis")
@@ -2035,7 +2103,7 @@ class RootArchitectureWindow(QMainWindow):
         left_layout.addWidget(export_group)
         
         left_layout.addStretch()
-
+        
         # On ajoute un scrolling verticale au panneau de gauche
         # Cela prévient l'écrasement de la liste des datasets sur de faibles résolutions
         left_scroll = QScrollArea()
@@ -2045,7 +2113,7 @@ class RootArchitectureWindow(QMainWindow):
         except Exception:
             pass
         left_scroll.setWidget(left_panel)
-
+        
         # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
         try:
             left_scroll.setHorizontalScrollBarPolicy(
@@ -2053,7 +2121,7 @@ class RootArchitectureWindow(QMainWindow):
             )
         except Exception:
             pass
-
+        
         splitter.addWidget(left_scroll)
         
         # === PANNEAU DROIT (identique) ===
@@ -2316,6 +2384,64 @@ class RootArchitectureWindow(QMainWindow):
         self._safe_set_enabled("run_btn", len(self.mask_files) > 0)
         self.log(f"✓ {len(self.mask_files)} files")
         
+        # If this dataset has been analyzed already during this session, restore cached results
+        cache = None
+        try:
+            cache = getattr(self, "_results_cache", {}).get(self.current_dataset, None)
+        except Exception:
+            cache = None
+        
+        if cache is not None:
+            try:
+                self.current_df = cache.get("df", None)
+                self.daily_data = cache.get("daily_data", {}) or {}
+            except Exception:
+                self.current_df = None
+                self.daily_data = {}
+            
+            # Refresh Results / Graphs / Visualisation immediately from cached data
+            try:
+                if self.current_df is not None:
+                    self.populate_results_table(self.current_df)
+                    self.update_plot()
+            except Exception:
+                pass
+            
+            # Sync sliders from cached days (important when user switches datasets after analysis)
+            try:
+                if self.daily_data:
+                    days = sorted(self.daily_data.keys())
+                    dmin, dmax = min(days), max(days)
+                    self.day_slider.setMinimum(dmin)
+                    self.day_slider.setMaximum(dmax)
+                    cur = self.day_slider.value()
+                    if cur < dmin or cur > dmax:
+                        cur = dmin
+                        self.day_slider.setValue(cur)
+                    self.day_label.setText(str(cur))
+                    # Heatmap slider if present
+                    if hasattr(self, "heatmap_day_slider") and self.heatmap_day_slider is not None:
+                        self.heatmap_day_slider.setMinimum(dmin)
+                        self.heatmap_day_slider.setMaximum(dmax)
+                        hcur = self.heatmap_day_slider.value()
+                        if hcur < dmin or hcur > dmax:
+                            self.heatmap_day_slider.setValue(cur)
+                    self.update_day_visualization()
+            except Exception:
+                pass
+            
+            # Buttons
+            try:
+                self._safe_set_enabled("export_csv_btn", self.current_df is not None and not self.current_df.empty)
+                self._safe_set_enabled("export_images_btn", True)
+            except Exception:
+                pass
+            return
+        
+        # No cache: clear current analysis state
+        self.daily_data = {}
+        self.current_df = None
+        
         days = []
         for f in self.mask_files:
             name = Path(f).name
@@ -2416,6 +2542,7 @@ class RootArchitectureWindow(QMainWindow):
         
         self.refresh_dataset_selector(keep_view=True)
         params = self.get_analysis_params()
+        self._analysis_dataset = self.current_dataset
         
         # Afficher les optimisations actives
         if params['min_branch_length'] > 0.0:
@@ -2432,12 +2559,22 @@ class RootArchitectureWindow(QMainWindow):
         self.worker.finished.connect(self.analysis_finished)
         self.worker.error.connect(self.analysis_error)
         
-        self._enter_busy(disable_widgets=[getattr(self, "run_btn", None), getattr(self, "select_btn", None), getattr(self, "batch_btn", None)])
+        self._safe_set_enabled("run_btn", False)
+        self._safe_set_enabled("select_btn", False)
         self.progress_bar.setValue(0)
-        self.daily_data.clear()
-        
-        self._stop_requested = False
-        self._safe_set_enabled("stop_btn", True)
+        # Reset only the data for the dataset being analyzed
+        try:
+            ds_key = self._analysis_dataset or self.current_dataset
+            if not hasattr(self, "_results_cache") or self._results_cache is None:
+                self._results_cache = {}
+            self._results_cache.setdefault(ds_key, {"df": None, "daily_data": {}})["daily_data"] = {}
+            # If the user is currently viewing the same dataset, clear the displayed data too
+            if self.current_dataset == ds_key:
+                self.daily_data = {}
+                self.current_df = None
+        except Exception:
+            self.daily_data = {}
+            self.current_df = None
         
         self.worker.start()
         self.log("Analysis started...")
@@ -2658,9 +2795,30 @@ class RootArchitectureWindow(QMainWindow):
         self._safe_set_text("status_label", message)
     
     def store_day_data(self, day, features, original, merged):
-        self.daily_data[day] = (features, original, merged)
-        self.log(f"✓ J{day}: {features['total_root_length']:.1f}px")
+        ds_key = getattr(self, "_analysis_dataset", None) or self.current_dataset
         
+        # Store into per-dataset cache
+        try:
+            if not hasattr(self, "_results_cache") or self._results_cache is None:
+                self._results_cache = {}
+            cache = self._results_cache.setdefault(ds_key, {"df": None, "daily_data": {}})
+            cache_daily = cache.setdefault("daily_data", {})
+            cache_daily[day] = (features, original, merged)
+        except Exception:
+            # Fallback (should not happen)
+            self.daily_data[day] = (features, original, merged)
+            cache_daily = self.daily_data
+        
+        self.log(f"✓ [{ds_key}] J{day}: {features.get('total_root_length', 0):.1f}px")
+        
+        # If the user is viewing a different dataset, do not overwrite the current visualization
+        if self.current_dataset != ds_key:
+            return
+        
+        # Point the 'current' view to this dataset's cached data
+        self.daily_data = cache_daily
+        
+        # Slider range + initial value
         if len(self.daily_data) == 1:
             days = sorted(self.daily_data.keys())
             self.day_slider.setMinimum(min(days))
@@ -2687,6 +2845,9 @@ class RootArchitectureWindow(QMainWindow):
                     self.heatmap_day_slider.setMaximum(max(days))
                 finally:
                     self.heatmap_day_slider.blockSignals(False)
+        
+        # Refresh visuals for the currently viewed dataset/day
+        self.update_day_visualization()
     
     def update_day_visualization(self):
         """Met à jour la visualisation pour le jour le plus proche ayant des données.
@@ -2780,8 +2941,21 @@ class RootArchitectureWindow(QMainWindow):
             add_cummax('root_count_raw', 'root_count_raw_cum')
             add_cummax('root_count_attach', 'root_count_attach_cum')
         
-        self.current_df = df
+        ds_key = getattr(self, "_analysis_dataset", None) or self.current_dataset
+        # Store/refresh cache for the dataset that was analyzed
+        try:
+            if not hasattr(self, "_results_cache") or self._results_cache is None:
+                self._results_cache = {}
+            cache = self._results_cache.setdefault(ds_key, {"df": None, "daily_data": {}})
+            cache["df"] = df
+            # Ensure daily_data exists in cache even if no day signal was received (edge cases)
+            cache.setdefault("daily_data", getattr(self, "daily_data", {}) or {})
+        except Exception:
+            pass
         
+        # Only overwrite the currently displayed dataframe if the user is viewing the analyzed dataset
+        if self.current_dataset == ds_key:
+            self.current_df = df
         # Refresh UI after state changes (helpful if user is on other tabs)
         try:
             QApplication.processEvents()
@@ -2801,6 +2975,52 @@ class RootArchitectureWindow(QMainWindow):
                         self.heatmap_day_slider.setMaximum(dmax)
             except Exception:
                 pass
+        
+        # ------------------------------------------------------------
+        # Cache results per dataset (for instant refresh when switching datasets)
+        # ------------------------------------------------------------
+        try:
+            if getattr(self, "current_dataset", None):
+                # Shallow copies to avoid duplicating large numpy arrays
+                _dd = {}
+                try:
+                    for _day, (_feat, _orig, _merged) in (self.daily_data or {}).items():
+                        _dd[_day] = (dict(_feat) if isinstance(_feat, dict) else _feat, _orig, _merged)
+                except Exception:
+                    _dd = dict(self.daily_data) if isinstance(self.daily_data, dict) else {}
+                _df = None
+                try:
+                    _df = self.current_df.copy() if self.current_df is not None else None
+                except Exception:
+                    _df = self.current_df
+                if not hasattr(self, "_results_cache") or self._results_cache is None:
+                    self._results_cache = {}
+                self._results_cache[ds_key] = {"df": _df, "daily_data": _dd}
+        except Exception:
+            pass
+        
+        # ------------------------------------------------------------
+        # Cache results per dataset (for instant refresh when switching datasets)
+        # ------------------------------------------------------------
+        try:
+            if getattr(self, "current_dataset", None):
+                # Shallow copies to avoid duplicating large numpy arrays
+                _dd = {}
+                try:
+                    for _day, (_feat, _orig, _merged) in (self.daily_data or {}).items():
+                        _dd[_day] = (dict(_feat) if isinstance(_feat, dict) else _feat, _orig, _merged)
+                except Exception:
+                    _dd = dict(self.daily_data) if isinstance(self.daily_data, dict) else {}
+                _df = None
+                try:
+                    _df = self.current_df.copy() if self.current_df is not None else None
+                except Exception:
+                    _df = self.current_df
+                if not hasattr(self, "_results_cache") or self._results_cache is None:
+                    self._results_cache = {}
+                self._results_cache[self.current_dataset] = {"df": _df, "daily_data": _dd}
+        except Exception:
+            pass
         
         # --------------------
         # Batch mode: auto-export + next dataset
@@ -2853,6 +3073,8 @@ class RootArchitectureWindow(QMainWindow):
             QTimer.singleShot(0, self._batch_start_next)
             return
         
+        self._analysis_dataset = None
+        
         self._safe_set_enabled("export_csv_btn", True)
         self._safe_set_enabled("export_images_btn", True)
         
@@ -2874,35 +3096,14 @@ class RootArchitectureWindow(QMainWindow):
         )
     
     def analysis_error(self, error_msg):
-        # Always leave busy state
-        self._exit_busy()
-        self._safe_set_enabled("stop_btn", False)
+        self._analysis_dataset = None
         self._safe_set_enabled("run_btn", True)
         self._safe_set_enabled("select_btn", True)
-        self._safe_set_enabled("batch_btn", True)
+        self.log(f"❌ ERROR: {error_msg}")
         
-        # Detect user cancellation
-        msg = str(error_msg)
-        msg_lower = msg.lower()
-        is_cancel = bool(getattr(self, "_stop_requested", False)) or ("stopped by user" in msg_lower) or ("interrupted" in msg_lower) or ("stop requested" in msg_lower) or ("cancel" in msg_lower) or ("aborted" in msg_lower)
-        
-        if is_cancel:
-            self.log("⛔ Analysis stopped.")
-            try:
-                self.progress_bar.setValue(0)
-            except Exception:
-                pass
-            self.status_label.setText("Stopped")
-            # Ensure batch is not left active
-            self._batch_active = False
-            QMessageBox.information(self, "Analysis", "⛔ Analysis stopped by user.")
-            return
-        
-        # Normal error
-        self.log(f"❌ ERROR: {msg}")
         QMessageBox.critical(
             self, "Analysis error:",
-            f"An error has occurred:\n{msg}"
+            f"An error has occurred:\n{error_msg}"
         )
     
     def populate_results_table(self, df):
@@ -2958,96 +3159,58 @@ class RootArchitectureWindow(QMainWindow):
             self.log(f"💾 Exporté: {filename}")
             QMessageBox.information(self, "Export successful", f"Results saved:\n{filename}")
     
+    # -------------------------
+    # Export helpers
+    # -------------------------
+    def _export_target_pixels(self):
+        """Renvoir (w_px, h_px, dpi) pour l'export des images de visualisation """
+        # Default fallback
+        sw, sh = 1600, 900
+        try:
+            screen = QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen is not None else None
+            if geom is not None:
+                sw = int(geom.width())
+                sh = int(geom.height())
+        except Exception:
+            pass
+        
+        # Target pixel size as a fraction of the screen (clamped)
+        w_px = int(max(900, min(2200, sw * 0.92)))
+        h_px = int(max(700, min(1650, sh * 0.88)))
+        
+        # Use a stable logical dpi (do NOT use physical DPI, it shrinks figures on HiDPI)
+        dpi = 120
+        
+        return w_px, h_px, dpi
+    
+    def _make_export_figure(self):
+        """Create a Matplotlib Figure sized in *pixels* (via figsize+dpi)."""
+        w_px, h_px, dpi = self._export_target_pixels()
+        try:
+            fig = Figure(figsize=(w_px / dpi, h_px / dpi), dpi=dpi, constrained_layout=True)
+        except TypeError:
+            fig = Figure(figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
+        return fig, dpi
+    
+    
     def export_visualizations(self):
         if not self.daily_data:
             return
         
         output_dir = QFileDialog.getExistingDirectory(
-            self, "Select output directory", 
+            self, "Select output directory",
         )
         
-        if output_dir:
-            output_path = Path(output_dir)
+        if not output_dir:
+            return
         
-            for day in sorted(self.daily_data.keys()):
-                features, original, merged = self.daily_data[day]
-                
-                fig = Figure(figsize=(12, 10))
-                
-                ax1 = fig.add_subplot(2, 2, 1)
-                ax2 = fig.add_subplot(2, 2, 2)
-                ax3 = fig.add_subplot(2, 2, 3)
-                ax4 = fig.add_subplot(2, 2, 4)
-                
-                ax1.imshow(original, cmap='gray')
-                ax1.set_title(f'Original - J{day}')
-                ax1.axis('off')
-                
-                ax2.imshow(merged, cmap='gray')
-                ax2.set_title('Merged')
-                ax2.axis('off')
-                
-                if len(features.get('skeleton', [])) > 0:
-                    ax3.imshow(features['skeleton'], cmap='gray')
-                    
-                    if len(features.get('convex_hull', [])) > 0:
-                        ax3.imshow(features['convex_hull'], cmap='Reds', alpha=0.2)
-                    
-                    if len(features.get('main_path', [])) > 0:
-                        main_path = features['main_path']
-                        ax3.plot(main_path[:, 1], main_path[:, 0], 'r-', linewidth=2)
-                    
-                    if len(features.get('endpoints', [])) > 0:
-                        endpoints = features['endpoints']
-                        ax3.scatter(endpoints[:, 1], endpoints[:, 0], c='yellow', s=30, 
-                                  marker='o', edgecolors='red', linewidths=1)
-                    
-                    ax3.set_title('Skeleton')
-                    ax3.axis('off')
-                
-                ax4.axis('off')
-                stats_text = f"""
-Day {day}
-Dataset: {self.current_dataset}
-
-Main root length: {features['main_root_length']:.1f} px
-Secondary roots length: {features['secondary_roots_length']:.1f} px
-Total length: {features['total_root_length']:.1f} px
-
-Number of branches: {features['branch_count']}
-Number of end points without pruning: {features['endpoint_count_raw']}
-Number of roots without pruning: {features['root_count_raw']}
-Number of end points: {features['endpoint_count']}
-Number of roots: {features['root_count']}
-
-Root count attach: {features['root_count_attach']}
-
-Mean secondary angles: {features['mean_secondary_angles']:.2f}
-Standard deviation secondary angles: {features['std_secondary_angles']:.2f}
-Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}
-Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}
-
-Total area: {features['total_area']:.0f} px²
-Convex area: {features['convex_area']:.0f} px²
-
-Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
-                """
-                ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, 
-                        fontsize=10, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-                
-                fig.tight_layout()
-                
-                save_path = output_path / f"root_arch_J{day:03d}.png"
-                fig.savefig(str(save_path), dpi=300, bbox_inches='tight')
-                plt.close(fig)
-            
-            self.log(f"💾 {len(self.daily_data)} exported images")
-            
-            QMessageBox.information(
-                self, "Export successful",
-                f"{len(self.daily_data)} exported visualizations"
-            )
+        self.export_visualizations_to(output_dir)
+        
+        QMessageBox.information(
+            self, "Export successful",
+            f"{len(self.daily_data)} exported visualizations"
+        )
     
     def export_visualizations_to(self, output_dir: str):
         """Export des visualisations (2x2) sans boîte de dialogue (mode batch)."""
@@ -3093,61 +3256,93 @@ Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
                 ax3.axis('off')
             
             ax4.axis('off')
-            stats_text = f"""
-Day {day}
-Dataset: {self.current_dataset}
-
-Main root length: {features['main_root_length']:.1f} px
-Secondary roots length: {features['secondary_roots_length']:.1f} px
-Total length: {features['total_root_length']:.1f} px
-
-Number of branches: {features['branch_count']}
-Number of end points without pruning: {features['endpoint_count_raw']}
-Number of roots without pruning: {features['root_count_raw']}
-Number of end points: {features['endpoint_count']}
-Number of roots: {features['root_count']}
-
-Root count attach: {features['root_count_attach']}
-
-Mean secondary angles: {features['mean_secondary_angles']:.2f}
-Standard deviation secondary angles: {features['std_secondary_angles']:.2f}
-Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}
-Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}
-
-Total area: {features['total_area']:.0f} px²
-Convex area: {features['convex_area']:.0f} px²
-
-Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})
-            """
+            dpi_save = 300
+            try:
+                fig_w_px = float(fig.get_figwidth()) * float(dpi_save)
+            except Exception:
+                fig_w_px = 0.0
             
-            # --- Grid: show summary + heatmap without overlapping the text ---
-            gl = features.get("grid_lengths", None)
+            # Consider the final saved image width (figsize * dpi_save)
+            compact_view = (fig_w_px > 0 and fig_w_px < 3300)
+            
+            if fig_w_px >= 5400:
+                stats_fs = 10
+            elif fig_w_px >= 4200:
+                stats_fs = 9
+            else:
+                stats_fs = 7 if compact_view else 8
+            
+            stats_text = (
+                f"Day {day}\n"
+                f"Dataset: {self.current_dataset}\n\n"
+                f"Main root length: {features['main_root_length']:.1f} px\n"
+                f"Secondary roots length: {features['secondary_roots_length']:.1f} px\n"
+                f"Total length: {features['total_root_length']:.1f} px\n\n"
+                f"Number of branches: {features['branch_count']}\n"
+                f"Number of end points without pruning: {features['endpoint_count_raw']}\n"
+                f"Number of roots without pruning: {features['root_count_raw']}\n"
+                f"Number of end points: {features['endpoint_count']}\n"
+                f"Number of roots: {features['root_count']}\n"
+                f"Root count attach: {features['root_count_attach']}\n\n"
+                f"Mean secondary angles: {features['mean_secondary_angles']:.2f}\n"
+                f"Standard deviation secondary angles: {features['std_secondary_angles']:.2f}\n"
+                f"Mean absolute secondary angles: {features['mean_abs_secondary_angles']:.2f}\n"
+                f"Std absolute secondary angles: {features['std_abs_secondary_angles']:.2f}\n\n"
+                f"Total area: {features['total_area']:.0f} px²\n"
+                f"Convex area: {features['convex_area']:.0f} px²\n\n"
+                f"Barycenter: ({features['centroid_x']:.1f}, {features['centroid_y']:.1f})"
+            )
+            
+            # --- Grid: add min/mean/max summary (no heatmap) ---
+            gl = features.get('grid_lengths', None)
             if isinstance(gl, np.ndarray) and gl.ndim == 2 and gl.size > 0:
                 try:
-                    stats_text += f"""
-            Grid per cell ({gl.shape[0]}x{gl.shape[1]}): min/mean/max = {np.min(gl):.2f}/{np.mean(gl):.2f}/{np.max(gl):.2f} px
-            """
+                    gmin = float(np.min(gl))
+                    gmean = float(np.mean(gl))
+                    gmax = float(np.max(gl))
+                    r, c = gl.shape[0], gl.shape[1]
+                    
+                    if compact_view:
+                        stats_text += (
+                            f"\n\nGrid ({r}x{c}): min/mean/max = {gmin:.2f}/{gmean:.2f}/{gmax:.2f} px"
+                        )
+                    else:
+                        stats_text += (
+                            f"\n\nGrid per cell ({r}x{c}):\n"
+                            f"  - Min: {gmin:.2f} px\n"
+                            f"  - Mean: {gmean:.2f} px\n"
+                            f"  - Max: {gmax:.2f} px"
+                        )
                 except Exception:
                     pass
-                try:
-                    inset = ax4.inset_axes([0.10, 0.05, 0.85, 0.28])
-                    inset.imshow(gl, aspect='auto', origin='upper')
-                    inset.set_title("Grid length heatmap (px)", fontsize=8)
-                    inset.set_xticks(range(gl.shape[1]))
-                    inset.set_yticks(range(gl.shape[0]))
-                    inset.tick_params(axis='both', which='major', labelsize=7)
-                    inset.set_xlabel("col", fontsize=7)
-                    inset.set_ylabel("row", fontsize=7)
-                except Exception:
-                    pass
-                text_y = 0.98
-            else:
-                text_y = 0.90
             
-            ax4.text(0.1, text_y, stats_text, transform=ax4.transAxes,
-                    fontsize=10, verticalalignment='top', fontfamily='monospace',
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            # Background box that fills the whole stats axis (better alignment than default bbox)
+            try:
+                ax4.add_patch(
+                    FancyBboxPatch(
+                        (0.0, 0.0), 1.0, 1.0,
+                        boxstyle='round,pad=0.02',
+                        transform=ax4.transAxes,
+                        linewidth=0,
+                        facecolor='wheat',
+                        alpha=0.5,
+                        zorder=0,
+                    )
+                )
+            except Exception:
+                pass
             
+            ax4.text(
+                0.03, 0.97,
+                stats_text,
+                transform=ax4.transAxes,
+                fontsize=stats_fs,
+                verticalalignment='top',
+                horizontalalignment='left',
+                fontfamily='monospace',
+                wrap=True,
+                zorder=1,
+            )
             fig.tight_layout()
             
             save_path = output_path / f"{self.current_dataset}_root_arch_J{day:03d}.png"
