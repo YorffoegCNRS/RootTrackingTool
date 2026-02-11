@@ -127,6 +127,8 @@ class DatasetSelectionWidget(QFrame):
         self.datasets = {}          # dict[str, DatasetInfo]
         self._current_view = None   # str | None
         self._updating_ui = False
+        self._locked = False  # lock dataset switching during analysis
+        
         
         self.setFrameStyle(QFrame.Shape.StyledPanel if PYQT_VERSION == 6 else QFrame.StyledPanel)
         
@@ -207,28 +209,82 @@ class DatasetSelectionWidget(QFrame):
         return [name for name, ds in self.datasets.items() if getattr(ds, "selected", False)]
     
     def set_viewing_dataset(self, dataset_name: str, emit_signal=False):
-        """Change le dataset 'Viewing' (sans modifier selected)."""
+        """Change le dataset 'Viewing' (sans modifier selected).
+        
+        IMPORTANT: si ce changement est déclenché programmaticalement (ex: revert pendant une analyse),
+        on resynchronise la sélection visuelle dans la QListWidget pour éviter les états "bloqués".
+        """
         if dataset_name not in self.datasets:
             return
+        
+        # Resync list selection to match the requested viewing dataset
+        try:
+            # Find row
+            row = None
+            for i in range(self.list_widget.count()):
+                if self.list_widget.item(i).text() == dataset_name:
+                    row = i
+                    break
+            if row is not None and row >= 0:
+                self._updating_ui = True
+                try:
+                    self.list_widget.setCurrentRow(row)
+                finally:
+                    self._updating_ui = False
+        except Exception:
+            pass
+        
         self._current_view = dataset_name
         self.current_view_label.setText(f"Viewing: {dataset_name}")
         self._update_selected_count()
         if emit_signal:
             self.dataset_view_requested.emit(dataset_name)
     
+    
+    def set_locked(self, locked: bool):
+        """Enable/disable any user interaction that can change the viewing dataset or the batch selection."""
+        self._locked = bool(locked)
+        enabled = not self._locked
+        
+        # Gray out controls
+        try:
+            self.select_all_btn.setEnabled(enabled)
+            self.deselect_all_btn.setEnabled(enabled)
+        except Exception:
+            pass
+        
+        try:
+            self.list_widget.setEnabled(enabled)
+        except Exception:
+            pass
+        
+        # Optional: make it visually obvious even if the OS/theme doesn't gray much
+        try:
+            self.setProperty("locked", self._locked)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        except Exception:
+            pass
+    
     def current_viewing_dataset(self):
         return self._current_view
     
     def select_all(self):
+        if getattr(self, '_locked', False):
+            return
         self._set_all_checkstates(True)
     
     def deselect_all(self):
+        if getattr(self, '_locked', False):
+            return
         self._set_all_checkstates(False)
     
     # -------------------------
     # Internals
     # -------------------------
     def _set_all_checkstates(self, state: bool):
+        if getattr(self, '_locked', False):
+            return
         self._updating_ui = True
         try:
             for i in range(self.list_widget.count()):
@@ -249,12 +305,16 @@ class DatasetSelectionWidget(QFrame):
         self.selected_count_label.setText(f"Selected: {selected}/{total}")
     
     def _on_item_clicked(self, item):
+        if getattr(self, '_locked', False):
+            return
         if not item:
             return
         ds_name = item.text()
         self.set_viewing_dataset(ds_name, emit_signal=True)
     
     def _on_item_changed(self, item):
+        if getattr(self, '_locked', False):
+            return
         if self._updating_ui or not item:
             return
         
