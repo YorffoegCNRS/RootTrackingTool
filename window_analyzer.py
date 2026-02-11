@@ -744,7 +744,7 @@ class RootArchitectureAnalyzer:
                     protect_mask[yy, xx] = True
             
             # seuil en pixels de la résolution actuelle (comme pour tes branches)
-            prune_len_px = max(1, int(round(self.min_branch_length * self.analysis_scale)))
+            prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
             
             skeleton_pruned = prune_terminal_spurs(
                 skeleton,
