@@ -696,7 +696,7 @@ class RootArchitectureAnalyzer:
                     protect_mask[yy, xx] = True
             
             # seuil en pixels de la résolution actuelle (comme pour tes branches)
-            prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
+            prune_len_px = max(1, int(round(self.min_branch_length * self.analysis_scale)))
             
             skeleton_pruned = prune_terminal_spurs(
                 skeleton,
@@ -733,7 +733,7 @@ class RootArchitectureAnalyzer:
             # self.min_branch_length est exprimé en "pixels de l'image d'origine".
             # Comme on a éventuellement redimensionné l'image avec self.scale_factor,
             # on corrige le seuil pour la résolution actuelle :
-            length_threshold_resized = self.min_branch_length * self.scale_factor
+            length_threshold_resized = self.min_branch_length * self.analysis_scale
             filtered_branches = []
             for br in secondary_branches:
                 if _branch_length_px(br) >= length_threshold_resized:
@@ -820,7 +820,7 @@ class RootArchitectureAnalyzer:
             centroid_x, centroid_y = 0, 0
         
         # Ajuster les mesures selon le facteur d'échelle
-        scale = 1.0 / self.scale_factor if self.scale_factor > 0 else 1.0
+        scale = 1.0 / self.analysis_scale if self.analysis_scale > 0 else 1.0
         
         # Longueur par cellule de grille
         grid_lengths_cm = None
