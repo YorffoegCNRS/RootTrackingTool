@@ -60,6 +60,36 @@ def image_read(image_path):
     return image
 
 
+# Replace file extension
+def replace_file_extension(file_name, new_extension):
+    return (os.extsep).join(file_name.split(os.extsep)[:-1]) + os.extsep + new_extension
+
+
+def ensure_rgb(image, path_hint=None):
+    """ S'assure qu'une image est bien retournée au format RGB (H,W,3). On suppose :
+    - cv2.imread() retourne une image au format BGR pour les images non TIF
+    - tifffile.imread() retourne une image au format RGB
+    On convertit donc les images BGR en RGB pour les images non TIF.
+    """
+    if image is None:
+        return None
+    if not isinstance(image, np.ndarray):
+        return image
+    if image.ndim == 2:
+        # grayscale -> 3-channel RGB for consistent display in threshold windows
+        return np.stack([image, image, image], axis=-1)
+    if image.ndim == 3 and image.shape[2] == 3:
+        if path_hint:
+            p = str(path_hint).lower()
+            if p.endswith(('.tif', '.tiff')):
+                return image
+        try:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        except Exception:
+            return image
+    return image
+
+
 class ProcessingWorker(QThread):
     """Thread worker pour le traitement en arrière-plan avec signaux de progression"""
     progress_update = pyqtSignal(str, int, int)  # message, current, total
@@ -119,8 +149,9 @@ class ProcessingWorker(QThread):
                             crop_image = image[rect.y():rect.y() + rect.height(),
                                              rect.x():rect.x() + rect.width()]
                             
-                            output_path = os.path.join(dataset_info.crop_directory[analysis_type], image_name)
-                            cv2.imwrite(output_path, crop_image)
+                            output_name = replace_file_extension(image_name, new_extension='png')
+                            output_path = os.path.join(dataset_info.crop_directory[analysis_type], output_name)
+                            cv2.imwrite(output_path, cv2.cvtColor(crop_image, cv2.COLOR_RGB2BGR))
                             
                             # Mise à jour fine de la progression
                             sub_progress = int((i + 1) / len(dataset_images) * 100)
@@ -138,7 +169,8 @@ class ProcessingWorker(QThread):
                     # Stocker le type pour l'export
                     self.parent_app.current_threshold_type = analysis_type
                     
-                    self.parent_app.analysis_dict[analysis_type] = {}
+                    if analysis_type not in self.parent_app.analysis_dict:
+                        self.parent_app.analysis_dict[analysis_type] = {}
                     
                     for dataset_name in self.selected_datasets:
                         if self.should_stop:
@@ -253,11 +285,12 @@ class ProcessingWorker(QThread):
             data_dict["Convex area"].append(convex_area)
             
             # Sauvegarder l'image segmentée
-            output_path = os.path.join(dataset_info.segmented_directory[analysis_type], image_name)
+            output_name = replace_file_extension(image_name, new_extension='png')
+            output_path = os.path.join(dataset_info.segmented_directory[analysis_type], output_name)
             cv2.imwrite(output_path, binary_image)
             
             # Sauvegarder l'enveloppe convexe
-            output_path = os.path.join(dataset_info.convex_hull_directory[analysis_type], image_name)
+            output_path = os.path.join(dataset_info.convex_hull_directory[analysis_type], output_name)
             cv2.imwrite(output_path, hull_mask)
             
             # Mise à jour de la progression
@@ -295,7 +328,8 @@ class ProcessingWorker(QThread):
             
             skeleton_image = np.array(skeletonize(image), dtype='uint8') * 255
             
-            output_path = os.path.join(dataset_info.skeletonized_directory[analysis_type], image_name)
+            output_name = replace_file_extension(image_name, new_extension='png')
+            output_path = os.path.join(dataset_info.skeletonized_directory[analysis_type], output_name)
             cv2.imwrite(output_path, skeleton_image)
     
     def stop(self):
@@ -414,7 +448,7 @@ class AnalysisConfig:
                                             'green_invert': False,
                                             'blue_invert': False,
                                             'min_branch_length': 20.0,
-                                            'max_connection_dst': 180,
+                                            'max_connection_dst': 240,
                                             'keep_max_component': False,
                                             'min_object_size': 800,
                                             'kernel_size': 5,
@@ -622,6 +656,13 @@ class ImageDisplayWidget(QLabel):
             self.selection_rect = self.convertOriginalToDisplayCoords(coords)
         else:
             self.selection_rect = None
+        self.update()
+    
+    def clearImage(self):
+        """Efface l'image affichée"""
+        self.original_pixmap = None
+        self.scaled_pixmap = None
+        self.image_array = None
         self.update()
     
     def clearSelection(self):
@@ -1111,6 +1152,13 @@ class App(QWidget):
         """Appelé quand un dataset est cliqué dans la liste (pour l'affichage)"""
         dataset_name = item.text()
         self.selectDatasetForViewing(dataset_name)
+        
+        # Rafraîchir le graphe si on est sur un onglet graphe
+        current_tab_index = self.tabWidget.currentIndex()
+        if current_tab_index == 3:  # Roots Graph tab
+            self.createSpecificGraph("roots")
+        elif current_tab_index == 4:  # Leaves Graph tab
+            self.createSpecificGraph("leaves")   
     
     def onDatasetSelectionChanged(self, item):
         """Appelé quand la checkbox d'un dataset change"""
@@ -1123,7 +1171,7 @@ class App(QWidget):
         """Sélectionne tous les datasets"""
         for i in range(self.datasetsList.count()):
             item = self.datasetsList.item(i)
-            item.setCheckState(Qt.Checked)
+            item.setCheckState(Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked)
             dataset_name = item.text()
             if dataset_name in self.datasets:
                 self.datasets[dataset_name].selected = True
@@ -1133,7 +1181,7 @@ class App(QWidget):
         """Désélectionne tous les datasets"""
         for i in range(self.datasetsList.count()):
             item = self.datasetsList.item(i)
-            item.setCheckState(Qt.Unchecked)
+            item.setCheckState(Qt.CheckState.Unchecked if PYQT_VERSION == 6 else Qt.Unchecked)
             dataset_name = item.text()
             if dataset_name in self.datasets:
                 self.datasets[dataset_name].selected = False
@@ -1459,14 +1507,23 @@ class App(QWidget):
     def loadCroppedImages(self):
         """Charge les images croppées pour les racines et feuilles si elles existent"""
         if not self.current_dataset or not hasattr(self.current_dataset, 'crop_directory'):
+            # Effacer les images si pas de dataset courant
+            self.rootsTab.clearImage()
+            self.leavesTab.clearImage()
             return
         
         for analysis_type in ["roots", "leaves"]:
+            crop_loaded = False
+            
             if (analysis_type in self.current_dataset.crop_directory and 
                 self.current_dataset.crop_directory[analysis_type] and 
                 os.path.exists(self.current_dataset.crop_directory[analysis_type])):
                 
-                cropped_path = os.path.join(self.current_dataset.crop_directory[analysis_type], self.current_image_name)
+                cropped_name = replace_file_extension(self.current_image_name, new_extension='png')
+                cropped_path = os.path.join(self.current_dataset.crop_directory[analysis_type], cropped_name)
+                if not os.path.exists(cropped_path):
+                    cropped_path = os.path.join(self.current_dataset.crop_directory[analysis_type], self.current_image_name)
+                
                 if os.path.exists(cropped_path):
                     cropped_image = cv2.cvtColor(image_read(cropped_path), cv2.COLOR_BGR2RGB)
                     
@@ -1475,6 +1532,14 @@ class App(QWidget):
                         self.rootsTab.setImageArray(cropped_image)
                     else:
                         self.leavesTab.setImageArray(cropped_image)
+                    crop_loaded = True
+            
+            # Si aucun crop n'a été chargé pour ce type, effacer l'affichage
+            if not crop_loaded:
+                if analysis_type == "roots":
+                    self.rootsTab.clearImage()
+                else:
+                    self.leavesTab.clearImage()
     
     def updateAllSelections(self):
         """Met à jour les sélections affichées dans tous les onglets"""
@@ -1585,22 +1650,34 @@ class App(QWidget):
         self.loadCroppedImages()
         print(f"All {analysis_type} images cropped successfully for selected datasets!")
     
+    
     def openThresholdWindow(self, analysis_type):
         """Ouvre la fenêtre de seuillage pour un type d'analyse"""
         config = self.analysis_configs[analysis_type]
         
         work_image = None
+        work_image_source = None
         if analysis_type == "roots":
             work_image = self.rootsTab.getDisplayedImage()
+            work_image_source = "roots"
         elif analysis_type == "leaves":
             work_image = self.leavesTab.getDisplayedImage()
+            work_image_source = "leaves"
         
         if work_image is None:
             work_image = self.originalTab.getDisplayedImage()
+            work_image_source = "original"
         
         if work_image is None:
             print(f"No image available for {analysis_type} analysis")
             return None
+        
+        # Normaliser l'ordre des canaux pour l'affichage dans la fenêtre de seuillage.
+        # - Les images croppées roots/leaves sont chargées en RGB (loadCroppedImages()).
+        # - L'image "original" dépend du format : cv2.imread -> BGR (non-TIFF), tifffile -> généralement déjà RGB.
+        if work_image_source == "original":
+            path_hint = getattr(self, "current_image_name", None)
+            work_image = ensure_rgb(work_image, path_hint)
         
         # Créer la fenêtre de seuillage avec les paramètres spécifiques
         self.threshold_window = EnhancedOptionsWindow(
