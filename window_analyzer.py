@@ -281,7 +281,7 @@ def prune_terminal_spurs(skel, min_len_px, protect_mask=None, max_iter=50):
 class RootArchitectureAnalyzer:
     """Analyseur optimisé pour réduire temps de calcul et mémoire"""
     
-    def __init__(self, max_image_size=2000, min_branch_length=10.0, max_skeleton_size=100000, connection_sample_rate=0.05, main_path_bias=20.0, grid_rows=3, grid_cols=2, pixels_per_cm=0.0):
+    def __init__(self, max_image_size=2000, min_branch_length=10.0, max_skeleton_size=100000, connection_sample_rate=0.05, main_path_bias=20.0, tolerance_pixel=5, grid_rows=3, grid_cols=2, pixels_per_cm=0.0):
         """
         Args:
             max_image_size: Taille max pour redimensionnement (0 = pas de redim)
@@ -299,6 +299,9 @@ class RootArchitectureAnalyzer:
         
         # Attraction vers la racine principale du dernier jour
         self.main_path_bias = main_path_bias # force de la pénalisation
+        
+        # Rayon de fermeture appliqué au masque en cours, résultat sur lequel on applique l'intersection avec le masque précédent pour la fusion
+        self.tolerance_pixel = tolerance_pixel
         
         # Nombre de lignes et colonnes grille
         self.grid_rows = grid_rows
@@ -435,6 +438,7 @@ class RootArchitectureAnalyzer:
         """
         Calcule la longueur exacte du squelette en pixels en parcourant tous les segments.
         Utilise la 8-connectivité avec distances euclidiennes exactes.
+        Version OPTIMISÉE avec code vectorisé numpy.
         
         Returns:
             float: Longueur totale du squelette en pixels
@@ -446,40 +450,43 @@ class RootArchitectureAnalyzer:
         if h == 0 or w == 0:
             return 0.0
         
-        ys, xs = np.nonzero(skeleton_bool)
-        if ys.size == 0:
-            return 0.0
-        
+        # Version vectorisée : utiliser des opérations numpy au lieu de boucles Python
         total_length = 0.0
         
-        # Parcourir tous les pixels du squelette
         # Pour éviter de compter deux fois les mêmes arêtes, on ne regarde que
-        # les voisins vers la droite et le bas (comme dans _grid_edge_lengths_from_skeleton)
-        neighbors = [
-            (0, 1, 1.0),              # droite
-            (1, 0, 1.0),              # bas
-            (1, 1, math.sqrt(2.0)),   # diagonale bas-droite
-            (1, -1, math.sqrt(2.0))   # diagonale bas-gauche
-        ]
+        # les voisins vers la droite et le bas (4 directions)
         
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            for dy, dx, seg_len in neighbors:
-                ny = y + dy
-                nx = x + dx
-                if ny < 0 or ny >= h or nx < 0 or nx >= w:
-                    continue
-                if not skeleton_bool[ny, nx]:
-                    continue
-                total_length += seg_len
+        # Direction 1 : droite (0, 1) - distance 1.0
+        if w > 1:
+            right_edges = skeleton_bool[:, :-1] & skeleton_bool[:, 1:]
+            total_length += np.sum(right_edges) * 1.0
+        
+        # Direction 2 : bas (1, 0) - distance 1.0  
+        if h > 1:
+            down_edges = skeleton_bool[:-1, :] & skeleton_bool[1:, :]
+            total_length += np.sum(down_edges) * 1.0
+        
+        # Direction 3 : diagonale bas-droite (1, 1) - distance sqrt(2)
+        if h > 1 and w > 1:
+            diag_br_edges = skeleton_bool[:-1, :-1] & skeleton_bool[1:, 1:]
+            total_length += np.sum(diag_br_edges) * math.sqrt(2.0)
+        
+        # Direction 4 : diagonale bas-gauche (1, -1) - distance sqrt(2)
+        if h > 1 and w > 1:
+            diag_bl_edges = skeleton_bool[:-1, 1:] & skeleton_bool[1:, :-1]
+            total_length += np.sum(diag_bl_edges) * math.sqrt(2.0)
         
         return total_length
     
+    
     def _grid_edge_lengths_from_skeleton(self, skeleton_bool, grid_rows, grid_cols):
-        """Compute skeleton length per grid cell (grid_rows x grid_cols).
+        """Compute skeleton length per grid cell (grid_rows x grid_cols), fast & vectorized.
         
-        Each skeleton segment is counted once using 8-connectivity edges to the right/bottom.
-        The segment is assigned to a cell using its midpoint.
-        Returns a (grid_rows, grid_cols) float array in *pixel* units.
+        We count each 8-connected edge once using forward neighbors:
+        right, down, down-right, down-left. Each edge is assigned to a cell
+        by the midpoint of its segment.
+        
+        Returns a (grid_rows, grid_cols) float array in pixel units.
         """
         if grid_rows is None or grid_cols is None:
             return None
@@ -495,37 +502,48 @@ class RootArchitectureAnalyzer:
         if h == 0 or w == 0:
             return None
         
-        cell_h = h / float(grid_rows)
-        cell_w = w / float(grid_cols)
-        
+        sk = skeleton_bool.astype(bool, copy=False)
         out = np.zeros((grid_rows, grid_cols), dtype=np.float64)
         
-        ys, xs = np.nonzero(skeleton_bool)
-        if ys.size == 0:
+        # cell size in pixels (float)
+        cell_h = h / float(grid_rows)
+        cell_w = w / float(grid_cols)
+        if cell_h <= 0 or cell_w <= 0:
             return out
         
-        # neighbor offsets (count each edge once)
-        neighbors = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, math.sqrt(2.0)), (1, -1, math.sqrt(2.0))]
+        sqrt2 = math.sqrt(2.0)
         
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            for dy, dx, seg_len in neighbors:
-                ny = y + dy
-                nx = x + dx
-                if ny < 0 or ny >= h or nx < 0 or nx >= w:
-                    continue
-                if not skeleton_bool[ny, nx]:
-                    continue
-                my = (y + ny) * 0.5
-                mx = (x + nx) * 0.5
-                r = int(my / cell_h) if cell_h > 0 else 0
-                c = int(mx / cell_w) if cell_w > 0 else 0
-                if r < 0: r = 0
-                if c < 0: c = 0
-                if r >= grid_rows: r = grid_rows - 1
-                if c >= grid_cols: c = grid_cols - 1
-                out[r, c] += seg_len
+        def _accumulate(edge_mask, dy, dx, seg_len):
+            if edge_mask is None:
+                return
+            ys, xs = np.nonzero(edge_mask)
+            if ys.size == 0:
+                return
+            
+            # midpoint of the segment
+            my = ys.astype(np.float64) + 0.5 * float(dy)
+            mx = xs.astype(np.float64) + 0.5 * float(dx)
+            
+            rr = np.floor(my / cell_h).astype(np.int32)
+            cc = np.floor(mx / cell_w).astype(np.int32)
+            
+            # clamp
+            rr = np.clip(rr, 0, grid_rows - 1)
+            cc = np.clip(cc, 0, grid_cols - 1)
+            
+            np.add.at(out, (rr, cc), seg_len)
+        
+        # Count each edge once: right, down, diag down-right, diag down-left
+        if w > 1:
+            _accumulate(sk[:, :-1] & sk[:, 1:], 0, 1, 1.0)
+        if h > 1:
+            _accumulate(sk[:-1, :] & sk[1:, :], 1, 0, 1.0)
+        if h > 1 and w > 1:
+            _accumulate(sk[:-1, :-1] & sk[1:, 1:], 1, 1, math.sqrt(2.0))
+            _accumulate(sk[:-1, 1:] & sk[1:, :-1], 1, -1, math.sqrt(2.0))
         
         return out
+    
     
     def skeletonize_and_analyze(self, binary_mask, main_ref_points=None, main_ref_path=None, grid_rows=None, grid_cols=None):
         """Version optimisée de l'analyse du squelette
@@ -562,11 +580,6 @@ class RootArchitectureAnalyzer:
         if len(skeleton_points) == 0:
             return self._empty_features()
         
-        # CALCUL DE LA LONGUEUR EXACTE DU SQUELETTE AVANT ÉCHANTILLONNAGE
-        # Cela donne la vraie longueur sans biais d'échantillonnage
-        exact_skeleton_length = self._compute_exact_skeleton_length(skeleton.astype(bool))
-        self.log(f"Exact skeleton length (pre-sampling): {exact_skeleton_length:.2f} px")
-        
         
         # Détection des extrémités (optimisée)
         kernel = np.ones((3, 3), dtype=np.uint8)
@@ -595,29 +608,27 @@ class RootArchitectureAnalyzer:
             
             self.log(f"Points reduced to {len(skeleton_points)}")
         
-        # Création du graphe (optimisée)
+        # Création du graphe (rapide, 8-connectivité en O(N))
+        # L'ancienne version utilisait un KDTree + query_ball_point par nœud, ce qui peut devenir très lent
+        # sur certains masques (ex: probabilités / squelette dense). Ici on construit les arêtes directement
+        # via les 4 voisins "avant" (droite, bas, diag bas-droite, diag bas-gauche) pour éviter les doublons.
         G = nx.Graph()
         
+        # Ensemble de points pour membership O(1)
+        pts = [tuple(p) for p in skeleton_points]
+        pts_set = set(pts)
+        
         # Ajouter les nœuds
-        for point in skeleton_points:
-            G.add_node(tuple(point))
+        G.add_nodes_from(pts)
         
-        # Ajouter les arêtes (8-connectivité, optimisée)
-        # Utiliser un KDTree pour trouver les voisins proches
-        tree = cKDTree(skeleton_points)
-        
-        for point in skeleton_points:
-            # Chercher les voisins dans un rayon de sqrt(2) pour 8-connectivité
-            indices = tree.query_ball_point(point, r=1.5)
-            
-            for idx in indices:
-                neighbor = tuple(skeleton_points[idx])
-                node = tuple(point)
-                
-                if neighbor != node and not G.has_edge(node, neighbor):
-                    dist = np.linalg.norm(np.array(neighbor) - np.array(node))
-                    if dist <= 1.5:  # 8-connectivité
-                        G.add_edge(node, neighbor, weight=dist)
+        # Ajouter les arêtes (8-connectivité, sans doublons)
+        sqrt2 = math.sqrt(2.0)
+        neighbor_steps = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, sqrt2), (1, -1, sqrt2)]
+        for (y, x) in pts:
+            for dy, dx, w in neighbor_steps:
+                nb = (y + dy, x + dx)
+                if nb in pts_set:
+                    G.add_edge((y, x), nb, weight=w)
         
         # ---------- Biais vers la racine de référence (dernier jour) ----------
         node_dist = None
@@ -632,7 +643,7 @@ class RootArchitectureAnalyzer:
                 
                 # échelle de distance pour normaliser (évite des énormes nombres)
                 max_d = max(node_dist.values()) or 1.0
-                alpha = float(self.main_path_bias)
+                alpha = float(self.main_path_bias) * 2.0  # Doublé pour stabilité
                 
                 # poids "biaisé" pour chaque arête
                 for u, v, data in G.edges(data=True):
@@ -661,29 +672,8 @@ class RootArchitectureAnalyzer:
                 ref_top = np.asarray(ref_top, dtype=float)
                 ref_bottom = np.asarray(ref_bottom, dtype=float)
                 
-                # AMÉLIORATION : Chercher les nœuds les plus proches en combinant
-                # (1) distance aux extrémités ET (2) proximité au chemin de référence
-                if main_ref_path is not None and node_dist is not None:
-                    # Normaliser les distances au chemin (0 = sur le chemin, 1 = très loin)
-                    max_path_dist = max(node_dist.values()) or 1.0
-                    
-                    def score_node_for_endpoint(n, ref_point):
-                        """Score combiné : distance à l'extrémité + distance au chemin"""
-                        n_arr = np.array(n, dtype=float)
-                        # Distance euclidienne à l'extrémité de référence
-                        dist_to_endpoint = np.linalg.norm(n_arr - ref_point)
-                        # Distance au chemin de référence (normalisée)
-                        dist_to_path = node_dist[n] / max_path_dist
-                        # Score combiné (pondération : 40% endpoint, 60% chemin)
-                        # Plus le score est petit, mieux c'est
-                        return 0.4 * dist_to_endpoint + 0.6 * dist_to_path * max_path_dist
-                    
-                    start_node = min(G.nodes, key=lambda n: score_node_for_endpoint(n, ref_top))
-                    end_node = min(G.nodes, key=lambda n: score_node_for_endpoint(n, ref_bottom))
-                else:
-                    # Fallback : ancienne méthode (seulement distance aux extrémités)
-                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
-                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
+                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
+                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
                 
                 if nx.has_path(G, start_node, end_node):
                     # si on a un biais (main_ref_path), on l'utilise
@@ -694,10 +684,10 @@ class RootArchitectureAnalyzer:
                                                  weight=weight_attr)
                     
                     # prolonger jusqu’aux vraies extrémités
-                    # main_path = self._extend_path_to_endpoints(G, main_path)
+                    main_path = self._extend_path_to_endpoints(G, main_path)
                     
                     # prolonger le chemin le long de l'axe global (ref_top -> ref_bottom)
-                    main_path = self._extend_path_along_axis(G, main_path, ref_top, ref_bottom)
+                    #                     main_path = self._extend_path_along_axis(G, main_path, ref_top, ref_bottom)
                     
                     main_path_length = sum(
                         np.linalg.norm(np.array(main_path[i], dtype=float) -
@@ -712,30 +702,38 @@ class RootArchitectureAnalyzer:
         # 2) Si ça n’a pas marché, on revient au comportement classique :
         #    extrémités les plus éloignées verticalement, puis fallback "plus long chemin"
         if main_path_length == 0.0 and len(endpoint_coords) >= 2:
-            # Fallback robuste: choisir la paire d'endpoints la plus éloignée (toutes orientations).
-            # L'ancienne heuristique (max/min sur l'axe vertical) échoue si la racine est horizontale
-            # ou si plusieurs extrémités ont la même coordonnée Y.
+            # CORRECTION FINALE : TOUJOURS partir du HAUT (Y min) vers le BAS (Y max)
+            # En coordonnées image : Y=0 est EN HAUT, donc min(Y)=sommet, max(Y)=bas
             try:
                 ep = np.asarray(endpoint_coords, dtype=float)
                 if ep.ndim == 2 and ep.shape[0] >= 2:
-                    # distances entre endpoints (petit N -> O(N^2) OK)
-                    D = cdist(ep, ep)
-                    i0, i1 = np.unravel_index(np.argmax(D), D.shape)
-                    p0 = ep[i0]
-                    p1 = ep[i1]
-                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - p0))
-                    end_node   = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - p1))
+                    # Trouver le point le plus HAUT (Y minimum)
+                    top_idx = np.argmin(ep[:, 0])
+                    top_point = ep[top_idx]
+                    
+                    # Trouver le point le plus BAS (Y maximum)
+                    bottom_idx = np.argmax(ep[:, 0])
+                    bottom_point = ep[bottom_idx]
+                    
+                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - top_point))
+                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - bottom_point))
                 else:
                     start_node = end_node = None
             except Exception:
                 start_node = end_node = None
             
+            # Fallback si pas assez d'endpoints
             if start_node is None or end_node is None:
-                # dernier recours: ancien comportement (vertical)
-                highest = max(endpoint_coords, key=lambda x: x[0])
-                lowest = min(endpoint_coords, key=lambda x: x[0])
-                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - highest))
-                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n) - lowest))
+                try:
+                    all_nodes = list(G.nodes)
+                    if len(all_nodes) >= 2:
+                        all_nodes_array = np.array(all_nodes, dtype=float)
+                        top_idx = np.argmin(all_nodes_array[:, 0])
+                        bottom_idx = np.argmax(all_nodes_array[:, 0])
+                        start_node = all_nodes[top_idx]
+                        end_node = all_nodes[bottom_idx]
+                except Exception:
+                    pass
             
             if start_node is not None and end_node is not None and nx.has_path(G, start_node, end_node):
                 main_path = nx.shortest_path(G, source=start_node, target=end_node, weight="weight")
@@ -765,7 +763,7 @@ class RootArchitectureAnalyzer:
                     protect_mask[yy, xx] = True
             
             # seuil en pixels de la résolution actuelle (comme pour tes branches)
-            prune_len_px = max(1, int(round(self.min_branch_length * self.analysis_scale)))
+            prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
             
             skeleton_pruned = prune_terminal_spurs(
                 skeleton,
@@ -799,7 +797,10 @@ class RootArchitectureAnalyzer:
             return float(seg_lengths.sum())
         
         if self.min_branch_length > 0:
-            length_threshold_resized = self.min_branch_length * self.analysis_scale
+            # self.min_branch_length est exprimé en "pixels de l'image d'origine".
+            # Comme on a éventuellement redimensionné l'image avec self.scale_factor,
+            # on corrige le seuil pour la résolution actuelle :
+            length_threshold_resized = self.min_branch_length * self.scale_factor
             filtered_branches = []
             for br in secondary_branches:
                 if _branch_length_px(br) >= length_threshold_resized:
@@ -886,7 +887,7 @@ class RootArchitectureAnalyzer:
             centroid_x, centroid_y = 0, 0
         
         # Ajuster les mesures selon le facteur d'échelle
-        scale = 1.0 / self.analysis_scale if self.analysis_scale > 0 else 1.0
+        scale = 1.0 / self.scale_factor if self.scale_factor > 0 else 1.0
         
         # Longueur par cellule de grille
         grid_lengths_cm = None
@@ -896,11 +897,13 @@ class RootArchitectureAnalyzer:
             if self.convert_to_cm and self.pixels_per_cm and self.pixels_per_cm > 0:
                 grid_lengths_cm = grid_lengths / float(self.pixels_per_cm)
         
+        exact_skeleton_length = self._compute_exact_skeleton_length(skeleton_pruned.astype(bool)) * scale
+        
         result = {
             'main_root_length': main_path_length * scale,
             'secondary_roots_length': secondary_length * scale,
             'total_root_length': (main_path_length + secondary_length) * scale,
-            'exact_skeleton_length': exact_skeleton_length * scale,  # NOUVELLE MÉTRIQUE EXACTE
+            'exact_skeleton_length': exact_skeleton_length,
             'branch_count': branch_count,
             'root_count_attach': root_count_attach,
             'endpoint_count_raw': endpoint_count_raw,
@@ -941,16 +944,17 @@ class RootArchitectureAnalyzer:
             result['main_root_length_cm'] = result['main_root_length'] / self.pixels_per_cm
             result['secondary_roots_length_cm'] = result['secondary_roots_length'] / self.pixels_per_cm
             result['total_root_length_cm'] = result['total_root_length'] / self.pixels_per_cm
-            result['exact_skeleton_length_cm'] = result['exact_skeleton_length'] / self.pixels_per_cm  # NOUVELLE MÉTRIQUE
+            result['exact_skeleton_length_cm'] = result['exact_skeleton_length'] / self.pixels_per_cm
+            result['total_area'] = result['exact_skeleton_length'] / (self.pixels_per_cm ** 2)
             result['convex_hull_cm'] = result['convex_hull'] / (self.pixels_per_cm ** 2)
             result['convex_area_cm'] = result['convex_area'] / (self.pixels_per_cm ** 2)
         
         # Libération mémoire
-        del skeleton_points, G, tree
+        del skeleton_points, G
         gc.collect()
         
         return result
-        
+    
     def _extend_path_to_endpoints(self, G, path):
         """
         Prolonge un chemin existant jusqu'aux vraies extrémités.
@@ -965,58 +969,62 @@ class RootArchitectureAnalyzer:
         
         path_deque = deque(path)
         
-        def extend_side(get_curr, get_prev, append_func):
+        def extend_side(get_curr, get_prev, append_func, prefer_direction='auto'):
             curr = np.array(get_curr(), dtype=float)
             prev = np.array(get_prev(), dtype=float)
             
             while True:
-                # direction actuelle (prev -> curr)
-                v_ref = curr - prev
-                if np.allclose(v_ref, 0):
-                    break
-                v_ref = v_ref / np.linalg.norm(v_ref)
-                
                 # voisins en excluant le nœud précédent
                 neighbors = [n for n in G.neighbors(tuple(curr)) if tuple(n) != tuple(prev)]
                 if not neighbors:
                     break  # extrémité atteinte
                 
-                # choisir le voisin le mieux aligné avec v_ref
-                best_n = None
-                best_dp = -1.0
-                for n in neighbors:
-                    v = np.array(n, dtype=float) - curr
-                    if np.allclose(v, 0):
-                        continue
-                    v = v / np.linalg.norm(v)
-                    dp = float(np.dot(v_ref, v))  # produit scalaire = cos(angle)
-                    if dp > best_dp:
-                        best_dp = dp
-                        best_n = n
-                
-                # si aucun voisin valable, on arrête
-                if best_n is None:
-                    break
-                
-                # si le meilleur voisin est très "cassé" (optionnel),
-                # on pourrait décider de s'arrêter. Pour l'instant on
-                # le suit quand même.
+                # CORRECTION : Choisir selon la stratégie
+                if prefer_direction == 'down':
+                    # Toujours le voisin le plus BAS (Y maximum = bas de l'image)
+                    best_n = max(neighbors, key=lambda n: n[0])
+                elif prefer_direction == 'up':
+                    # Toujours le voisin le plus HAUT (Y minimum = haut de l'image)
+                    best_n = min(neighbors, key=lambda n: n[0])
+                else:
+                    # Auto: alignement directionnel (comportement original)
+                    v_ref = curr - prev
+                    if np.allclose(v_ref, 0):
+                        break
+                    v_ref = v_ref / np.linalg.norm(v_ref)
+                    
+                    best_n = None
+                    best_dp = -1.0
+                    for n in neighbors:
+                        v = np.array(n, dtype=float) - curr
+                        if np.allclose(v, 0):
+                            continue
+                        v = v / np.linalg.norm(v)
+                        dp = float(np.dot(v_ref, v))
+                        if dp > best_dp:
+                            best_dp = dp
+                            best_n = n
+                    
+                    if best_n is None:
+                        break
                 
                 append_func(tuple(best_n))
                 prev, curr = curr, np.array(best_n, dtype=float)
         
-        # prolonger vers le "haut" du chemin
+        # prolonger vers le "haut" du chemin - TOUJOURS monter (Y min)
         extend_side(
             get_curr=lambda: path_deque[0],
             get_prev=lambda: path_deque[1],
-            append_func=path_deque.appendleft
+            append_func=path_deque.appendleft,
+            prefer_direction='up'  # Force à monter jusqu'en haut
         )
         
-        # prolonger vers le "bas" du chemin
+        # prolonger vers le "bas" du chemin - TOUJOURS descendre (Y max)
         extend_side(
             get_curr=lambda: path_deque[-1],
             get_prev=lambda: path_deque[-2],
-            append_func=path_deque.append
+            append_func=path_deque.append,
+            prefer_direction='down'  # Force à descendre jusqu'en bas
         )
         
         return list(path_deque)
@@ -1102,6 +1110,7 @@ class RootArchitectureAnalyzer:
             'main_root_length': 0.0,
             'secondary_roots_length': 0.0,
             'total_root_length': 0.0,
+            'exact_skeleton_length': 0.0,
             'branch_count': 0,
             'root_count_attach': 0,
             'endpoint_count_raw': 0,
@@ -1155,6 +1164,7 @@ class RootArchitectureWorker(QThread):
             max_skeleton_size=params.get('min_sampling_threshold', 100000),
             connection_sample_rate=params.get('connection_sample_rate', 0.05),
             main_path_bias=params.get('main_path_bias', 20.0),
+            tolerance_pixel=params.get('fusion_tolerance_pixel', 5),
             grid_rows=params.get('grid_rows', 3),
             grid_cols=params.get('grid_cols', 2),
             pixels_per_cm=params.get('pixels_per_cm', 0.0)
@@ -1179,6 +1189,7 @@ class RootArchitectureWorker(QThread):
             # ----------------------------
             preprocessed = []
             previous_merged = None
+            ref_path = None  # CORRECTION : Initialiser ref_path avant son utilisation
             total = len(self.mask_files)
             
             for idx, mask_file in enumerate(self.mask_files):
@@ -1209,7 +1220,39 @@ class RootArchitectureWorker(QThread):
                 mask = self.analyzer.resize_if_needed(mask)
                 
                 # Binarisation
-                binary_mask = (mask > 0).astype(np.uint8)
+                # NOTE: certains fichiers "*_Probabilities*" ne sont pas des masques binaires stricts.
+                # Un simple (mask > 0) peut alors transformer tout le fond en "racine" et faire exploser
+                # la taille du squelette (et donc le temps de calcul).
+                m = mask
+                try:
+                    # Si l'image est déjà binaire (0/1 ou 0/255), on garde le comportement simple.
+                    uniq = np.unique(m)
+                    if uniq.size <= 2:
+                        binary_mask = (m > 0).astype(np.uint8)
+                    else:
+                        # Otsu sur uint8 (robuste pour des cartes de probabilités / gradients)
+                        if m.dtype != np.uint8:
+                            m8 = cv2.normalize(m, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                        else:
+                            m8 = m
+                        _, th = cv2.threshold(m8, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                        binary_mask = th.astype(np.uint8)
+                        
+                        # Fallback si Otsu produit un masque quasi plein (souvent dû à un fond non nul)
+                        fill_ratio = float(np.mean(binary_mask))
+                        if fill_ratio > 0.95:
+                            # seuil plus strict
+                            _, th2 = cv2.threshold(m8, 128, 1, cv2.THRESH_BINARY)
+                            binary_mask = th2.astype(np.uint8)
+                            fill_ratio2 = float(np.mean(binary_mask))
+                            if fill_ratio2 > 0.95:
+                                # dernier recours : percentile (garde les valeurs les plus fortes)
+                                t = np.percentile(m8, 98)
+                                binary_mask = (m8 >= t).astype(np.uint8)
+                except Exception:
+                    # Comportement historique
+                    binary_mask = (m > 0).astype(np.uint8)
+                
                 original_mask = binary_mask.copy()
                 
                 # Métadonnées
@@ -1217,7 +1260,10 @@ class RootArchitectureWorker(QThread):
                 day = int(day_match.group(1)) if day_match else idx
                 modality = filename.split("_")[0] if "_" in filename else "unknown"
                 
-                # Fusion temporelle
+                # Fusion temporelle (VERSION CORRIGÉE - continuité locale)
+                # Ne plus accumuler infiniment les pixels, mais permettre une continuité locale
+                # NOTE : Si graphe déconnecté (trous), augmenter tolerance_pixels (ex: 8-10)
+                #        ou activer "Connect objects" avec max_connection_dst > 150
                 if previous_merged is not None and self.params['temporal_merge']:
                     # Redimensionner previous_merged si nécessaire
                     if previous_merged.shape != binary_mask.shape:
@@ -1227,9 +1273,20 @@ class RootArchitectureWorker(QThread):
                             interpolation=cv2.INTER_NEAREST
                         )
                     validate_same_shape(previous_merged, binary_mask, name_a="previous_merged", name_b="binary_mask")
-                    merged_mask = np.logical_or(binary_mask, previous_merged).astype(np.uint8)
+                    
+                    # Dilater légèrement le masque ACTUEL pour définir une zone de continuité
+                    tolerance_pixels = self.analyzer.tolerance_pixel  # Ajustable si nécessaire
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (tolerance_pixels*2+1, tolerance_pixels*2+1))
+                    current_dilated = cv2.dilate(binary_mask, kernel, iterations=1)
+                    
+                    # Ne garder du masque précédent que ce qui est PROCHE du masque actuel
+                    previous_in_continuity = np.logical_and(previous_merged, current_dilated).astype(np.uint8)
+                    
+                    # Fusionner : masque actuel + partie continue du précédent
+                    merged_mask = np.logical_or(binary_mask, previous_in_continuity).astype(np.uint8)
                 else:
                     merged_mask = binary_mask.copy()
+                
                 
                 # Prétraitement morphologique
                 # Scale pixel-based parameters to keep behavior consistent when images are resized
@@ -1283,55 +1340,32 @@ class RootArchitectureWorker(QThread):
             preprocessed.sort(key=lambda d: d["day"])
             
             # ----------------------------
-            # 2) Récupérer la racine principale du dernier jour
+            # 2) ORDRE CHRONOLOGIQUE : Analyser du PREMIER au DERNIER jour
             # ----------------------------
-            last_item = preprocessed[-1]
-            last_day = last_item["day"]
-            
-            # Analyse (50 -> 100%)
-            # On compte : 1 step par jour analysé + éventuellement 1 step de "re-align".
+            # Ceci permet une continuité temporelle naturelle et stable
             analysis_steps = max(len(preprocessed), 1)
-            did_realign = False
             analyzed_done = 0
-            
-            # Analyse du dernier jour (sert de référence)
-            self.progress.emit(50, f"Analysis: {last_item['filename']}")
-            _check_interrupt()
-            last_features = self.analyzer.skeletonize_and_analyze(
-                last_item["processed"],
-                grid_rows=self.params.get("grid_rows", None),
-                grid_cols=self.params.get("grid_cols", None)
-            )
-            analyzed_done += 1
-            self.progress.emit(
-                50 + int((analyzed_done / analysis_steps) * 50),
-                f"Analysis: {last_item['filename']}"
-            )
-            
-            ref_path = last_features.get("main_path", None)
-            # Si on n'a pas de chemin valable, on fera sans continuité
-            if not (isinstance(ref_path, np.ndarray) and len(ref_path) >= 2):
-                ref_path = None
-            
-            features_by_day = {last_day: last_features}
+            features_by_day = {}
+            # ref_path déjà initialisé avant le preprocessing (ligne 1354)
             
             # ----------------------------
-            # 3) Remonter dans le temps : J(N-1) -> J0
+            # 3) Analyse chronologique : J0 -> J(N)
             # ----------------------------
-            for item in reversed(preprocessed[:-1]):
+            for item in preprocessed:
                 _check_interrupt()
                 day = item["day"]
                 filename = item["filename"]
                 
-                # 50 -> 100% réparti sur tous les jours analysés
+                # Progression 50 -> 100%
                 self.progress.emit(
                     50 + int((analyzed_done / analysis_steps) * 50),
                     f"Analysis: {filename}"
                 )
                 
+                # Analyser en utilisant le jour PRÉCÉDENT comme référence (continuité naturelle)
                 features = self.analyzer.skeletonize_and_analyze(
                     item["processed"],
-                    main_ref_path=ref_path,  # on force à suivre le jour suivant
+                    main_ref_path=ref_path,  # suit le jour précédent
                     grid_rows=self.params.get("grid_rows", None),
                     grid_cols=self.params.get("grid_cols", None)
                 )
@@ -1344,40 +1378,14 @@ class RootArchitectureWorker(QThread):
                 
                 features_by_day[day] = features
                 
-                # Met à jour la référence pour le jour d'avant
+                # Mettre à jour la référence pour le jour SUIVANT
                 mp = features.get("main_path", None)
                 if isinstance(mp, np.ndarray) and len(mp) >= 2:
                     ref_path = mp
+                # SINON : garder l'ancienne référence (continuité malgré les trous)
+                # Cela permet de "sauter" un jour problématique sans perdre la référence
             
-            # ----------------------------
-            # 3bis) Recalage du DERNIER jour sur le jour précédent
-            # ----------------------------
-            days_sorted = sorted(features_by_day.keys())
-            if len(days_sorted) >= 2:
-                last_day = days_sorted[-1]
-                prev_last_day = days_sorted[-2]
-                
-                prev_path = features_by_day[prev_last_day].get("main_path", None)
-                if isinstance(prev_path, np.ndarray) and len(prev_path) >= 2:
-                    # Retrouver le masque traité du dernier jour
-                    last_item = next(d for d in preprocessed if d["day"] == last_day)
-                    
-                    # Recalcule J(last) en le forçant à suivre J(last-1)
-                    did_realign = True
-                    # On réserve 1 "step" implicite pour le recalage : on clamp à 99% ici.
-                    self.progress.emit(
-                        max(50, min(99, 50 + int((analyzed_done / analysis_steps) * 50))),
-                        f"Re-aligning last day (J{last_day}) to previous main root"
-                    )
-                    _check_interrupt()
-                    corrected_last = self.analyzer.skeletonize_and_analyze(
-                        last_item["processed"],
-                        main_ref_path=prev_path,
-                        grid_rows=self.params.get("grid_rows", None),
-                        grid_cols=self.params.get("grid_cols", None)
-                    )
-                    
-                    features_by_day[last_day] = corrected_last
+            # Plus besoin de recalage : l'analyse chronologique assure la continuité
             
             # ----------------------------
             # 4) Construction du DataFrame + signaux Qt
@@ -1832,7 +1840,7 @@ class RootArchitectureWindow(QMainWindow):
                                   'closing_shape': cv2.MORPH_RECT,
                                   'min_branch_length': 20.0,
                                   'min_object_size': 500,
-                                  'max_connection_dst': 180,
+                                  'max_connection_dst': 240,
                                   'line_thickness': 5,
                                   'temporal_merge': True,
                                   'connect_objects': True,
@@ -2047,7 +2055,7 @@ class RootArchitectureWindow(QMainWindow):
         closing_layout = QHBoxLayout()
         closing_layout.addWidget(QLabel("Closing radius:"))
         self.closing_spin = QSpinBox()
-        self.closing_spin.setRange(1, 100)
+        self.closing_spin.setRange(1, 200)
         self.closing_spin.setValue(5)
         closing_layout.addWidget(self.closing_spin)
         params_layout.addLayout(closing_layout)
@@ -2073,7 +2081,7 @@ class RootArchitectureWindow(QMainWindow):
         max_connection_dst_layout.addWidget(QLabel("Maximum connection distance:"))
         self.max_connection_dst_spin = QSpinBox()
         self.max_connection_dst_spin.setRange(0, 2000)
-        self.max_connection_dst_spin.setValue(180)
+        self.max_connection_dst_spin.setValue(240)
         max_connection_dst_layout.addWidget(self.max_connection_dst_spin)
         params_layout.addLayout(max_connection_dst_layout)
         
@@ -2093,6 +2101,15 @@ class RootArchitectureWindow(QMainWindow):
         self.main_path_bias_spin.setSingleStep(1)
         main_path_bias_layout.addWidget(self.main_path_bias_spin)
         params_layout.addLayout(main_path_bias_layout)
+        
+        tolerance_pixel_layout = QHBoxLayout()
+        tolerance_pixel_layout.addWidget(QLabel("Fusion tolerance pixel:"))
+        self.tolerance_pixel_spin = QSpinBox()
+        self.tolerance_pixel_spin.setRange(0, 200)
+        self.tolerance_pixel_spin.setValue(5)
+        self.tolerance_pixel_spin.setSingleStep(1)
+        tolerance_pixel_layout.addWidget(self.tolerance_pixel_spin)
+        params_layout.addLayout(tolerance_pixel_layout)
         
         pixels_per_cm_layout = QHBoxLayout()
         pixels_per_cm_layout.addWidget(QLabel("Pixels/cm"))
@@ -2296,11 +2313,13 @@ class RootArchitectureWindow(QMainWindow):
         plot_control.addWidget(QLabel("Variable:"))
         self.plot_combo = QComboBox()
         self.plot_combo.addItems([
-            'total_root_length', 'main_root_length', 'secondary_roots_length',
-            'branch_count', 'root_count_raw', 'root_count', 'root_count_attach',
-            'root_count_raw_cum', 'root_count_cum', 'root_count_attach_cum', 
-            'convex_area', 'total_area', 
-            'mean_secondary_angles', 'mean_abs_secondary_angles', 
+            'main_root_length', 'main_root_length_cm', 'secondary_roots_length', 
+            'secondary_roots_length_cm', 'total_root_length', 'total_root_length_cm'
+            'secondary_roots_length', 'exact_skeleton_length', 'exact_skeleton_length_cm'
+            'branch_count', 'endpoint_count_raw', 'root_count_raw', 'endpoint_count', 'root_count',
+            'root_count_attach', 'root_count_raw_cum', 'root_count_cum', 'root_count_attach_cum', 
+            'total_area', 'convex_hull', 'convex_hull_cm', 'convex_area', 'convex_area_cm', 
+            'total_area', 'mean_secondary_angles', 'mean_abs_secondary_angles', 
             'std_secondary_angles', 'std_abs_secondary_angles'
         ])
         self.plot_combo.currentTextChanged.connect(self.update_plot)
@@ -2618,6 +2637,7 @@ class RootArchitectureWindow(QMainWindow):
             'max_connection_dst':self.max_connection_dst_spin.value(),
             'connect_objects': self.connect_check.isChecked(),
             'main_path_bias': self.main_path_bias_spin.value(),
+            'fusion_tolerance_pixel': self.tolerance_pixel_spin.value(),
             'pixels_per_cm': self.pixels_per_cm_spin.value(),
             'grid_rows': int(self.n_grid_rows_combobox.currentText()),
             'grid_cols': int(self.n_grid_cols_combobox.currentText()),
@@ -2713,6 +2733,7 @@ class RootArchitectureWindow(QMainWindow):
         
         self._safe_set_enabled("run_btn", False)
         self._safe_set_enabled("select_btn", False)
+        self._safe_set_enabled("stop_btn", True)
         self.progress_bar.setValue(0)
         # Reset only the data for the dataset being analyzed
         try:
