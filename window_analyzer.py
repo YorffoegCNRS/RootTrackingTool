@@ -15,7 +15,7 @@ PYQT_AVAILABLE = False
 PYQT_VERSION = None
 
 try:
-    from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+    from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QObject, QEvent
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                 QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
                                 QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
@@ -31,7 +31,7 @@ except:
                                     QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
                                     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
                                     QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
-        from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
+        from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QObject, QEvent
         from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
         PYQT_AVAILABLE = True
         PYQT_VERSION = 5
@@ -276,6 +276,49 @@ def prune_terminal_spurs(skel, min_len_px, protect_mask=None, max_iter=50):
             break
     
     return skel
+
+
+class _WheelToScrollAreaFilter(QObject):
+    """Empêche la roulette de modifier les QSpinBox/QDoubleSpinBox/QComboBox tant qu'ils n'ont pas le focus.
+    À la place, on fait défiler la QScrollArea (panneau de gauche).
+    
+    Objectif : éviter les changements involontaires de paramètres lorsque l'utilisateur veut seulement scroller.
+    """
+    
+    def __init__(self, scroll_area, parent=None):
+        super().__init__(parent)
+        self._scroll_area = scroll_area
+    
+    def eventFilter(self, obj, event):
+        try:
+            etype = event.type()
+            wheel_type = QEvent.Type.Wheel if hasattr(QEvent, "Type") else QEvent.Wheel
+            if etype == wheel_type:
+                # Si le widget n'a pas le focus, on redirige la roulette vers la scroll area
+                if hasattr(obj, "hasFocus") and not obj.hasFocus():
+                    sa = self._scroll_area
+                    try:
+                        bar = sa.verticalScrollBar()
+                    except Exception:
+                        return True  # on bloque quand même
+                    # Delta standard (angleDelta) : 120 = un cran
+                    dy = 0
+                    try:
+                        dy = int(event.angleDelta().y())
+                    except Exception:
+                        try:
+                            dy = int(event.delta())
+                        except Exception:
+                            dy = 0
+                    if dy != 0:
+                        step = bar.singleStep()
+                        # facteur empirique pour un scroll fluide, sans être trop rapide
+                        bar.setValue(bar.value() - int((dy / 120.0) * step * 3))
+                    return True  # on bloque la modification de valeur
+        except Exception:
+            # En cas de doute, on n'empêche pas l'event
+            return False
+        return False
 
 
 class RootArchitectureAnalyzer:
@@ -2250,6 +2293,18 @@ class RootArchitectureWindow(QMainWindow):
         except Exception:
             pass
         left_scroll.setWidget(left_panel)
+        
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = _WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = Qt.FocusPolicy.StrongFocus if hasattr(Qt, "FocusPolicy") else Qt.StrongFocus
+        for w in left_panel.findChildren((QSpinBox, QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
         
         # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
         try:
