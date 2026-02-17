@@ -1000,77 +1000,84 @@ class RootArchitectureAnalyzer:
     
     def _extend_path_to_endpoints(self, G, path):
         """
-        Prolonge un chemin existant jusqu'aux vraies extrémités.
+        Prolonge un chemin existant jusqu'aux vraies extrémités globales.
         
-        Au lieu de s'arrêter au premier nœud de degré > 2, on choisit
-        à chaque bifurcation le voisin dont la direction est la plus
-        alignée avec la direction actuelle du chemin (prolongation
-        naturelle de la racine principale).
+        Stratégie : depuis chaque extrémité du chemin, effectue un parcours
+        en avant uniquement (BFS unidirectionnel sans revenir en arrière)
+        pour atteindre l'endpoint le plus extrême, en évitant de croiser
+        des nœuds déjà dans le chemin principal.
         """
         if not path or len(path) < 2:
             return path
         
-        path_deque = deque(path)
-        
-        def extend_side(get_curr, get_prev, append_func, prefer_direction='auto'):
-            curr = np.array(get_curr(), dtype=float)
-            prev = np.array(get_prev(), dtype=float)
+        def find_extreme_endpoint_forward(G, anchor, forbidden, extreme='max_y'):
+            """
+            BFS depuis anchor, sans jamais passer par les nœuds forbidden.
+            Retourne le chemin (liste) vers l'endpoint le plus extrême trouvé.
+            """
+            # BFS pour explorer tous les nœuds accessibles sans revenir
+            visited = {anchor}
+            # parent dict pour reconstruire le chemin
+            parent = {anchor: None}
+            queue = deque([anchor])
             
-            while True:
-                # voisins en excluant le nœud précédent
-                neighbors = [n for n in G.neighbors(tuple(curr)) if tuple(n) != tuple(prev)]
-                if not neighbors:
-                    break  # extrémité atteinte
-                
-                # CORRECTION : Choisir selon la stratégie
-                if prefer_direction == 'down':
-                    # Toujours le voisin le plus BAS (Y maximum = bas de l'image)
-                    best_n = max(neighbors, key=lambda n: n[0])
-                elif prefer_direction == 'up':
-                    # Toujours le voisin le plus HAUT (Y minimum = haut de l'image)
-                    best_n = min(neighbors, key=lambda n: n[0])
-                else:
-                    # Auto: alignement directionnel (comportement original)
-                    v_ref = curr - prev
-                    if np.allclose(v_ref, 0):
-                        break
-                    v_ref = v_ref / np.linalg.norm(v_ref)
-                    
-                    best_n = None
-                    best_dp = -1.0
-                    for n in neighbors:
-                        v = np.array(n, dtype=float) - curr
-                        if np.allclose(v, 0):
-                            continue
-                        v = v / np.linalg.norm(v)
-                        dp = float(np.dot(v_ref, v))
-                        if dp > best_dp:
-                            best_dp = dp
-                            best_n = n
-                    
-                    if best_n is None:
-                        break
-                
-                append_func(tuple(best_n))
-                prev, curr = curr, np.array(best_n, dtype=float)
+            while queue:
+                curr = queue.popleft()
+                for nb in G.neighbors(curr):
+                    if nb not in visited and nb not in forbidden:
+                        visited.add(nb)
+                        parent[nb] = curr
+                        queue.append(nb)
+            
+            # Parmi tous les nœuds visités, trouver les endpoints (degré 1 dans G)
+            endpoints_reached = [n for n in visited if G.degree(n) == 1 and n != anchor]
+            
+            if not endpoints_reached:
+                # Pas d'endpoint : prendre le nœud le plus extrême parmi les visités
+                candidates = list(visited - {anchor})
+                if not candidates:
+                    return []
+                endpoints_reached = candidates
+            
+            # Choisir l'endpoint le plus extrême
+            if extreme == 'min_y':
+                target = min(endpoints_reached, key=lambda n: n[0])
+            else:
+                target = max(endpoints_reached, key=lambda n: n[0])
+            
+            # Reconstruire le chemin depuis anchor vers target via parent
+            path_ext = []
+            curr = target
+            while curr is not None:
+                path_ext.append(curr)
+                curr = parent[curr]
+            path_ext.reverse()  # anchor → target
+            
+            return path_ext  # commence par anchor
         
-        # prolonger vers le "haut" du chemin - TOUJOURS monter (Y min)
-        extend_side(
-            get_curr=lambda: path_deque[0],
-            get_prev=lambda: path_deque[1],
-            append_func=path_deque.appendleft,
-            prefer_direction='up'  # Force à monter jusqu'en haut
-        )
+        path_list = list(path)
+        path_set = set(tuple(n) for n in path_list)
         
-        # prolonger vers le "bas" du chemin - TOUJOURS descendre (Y max)
-        extend_side(
-            get_curr=lambda: path_deque[-1],
-            get_prev=lambda: path_deque[-2],
-            append_func=path_deque.append,
-            prefer_direction='down'  # Force à descendre jusqu'en bas
-        )
+        # --- Prolonger vers le HAUT (endpoint avec Y minimum) ---
+        top_anchor = tuple(path_list[0])
+        # Forbidden = tout le chemin sauf l'ancre elle-même
+        forbidden_top = path_set - {top_anchor}
+        ext_top = find_extreme_endpoint_forward(G, top_anchor, forbidden_top, extreme='min_y')
+        if len(ext_top) > 1:
+            # ext_top[0] == top_anchor, on l'exclut pour éviter le doublon
+            path_list = list(reversed(ext_top[1:])) + path_list
         
-        return list(path_deque)
+        # Recalculer path_set après extension haute
+        path_set = set(tuple(n) for n in path_list)
+        
+        # --- Prolonger vers le BAS (endpoint avec Y maximum) ---
+        bottom_anchor = tuple(path_list[-1])
+        forbidden_bot = path_set - {bottom_anchor}
+        ext_bot = find_extreme_endpoint_forward(G, bottom_anchor, forbidden_bot, extreme='max_y')
+        if len(ext_bot) > 1:
+            path_list = path_list + list(ext_bot[1:])
+        
+        return path_list
     
     def _extend_path_along_axis(self, G, path, top, bottom):
         """
@@ -2368,14 +2375,12 @@ class RootArchitectureWindow(QMainWindow):
         plot_control.addWidget(QLabel("Variable:"))
         self.plot_combo = QComboBox()
         self.plot_combo.addItems([
-            'main_root_length', 'main_root_length_cm', 'secondary_roots_length', 
-            'secondary_roots_length_cm', 'total_root_length', 'total_root_length_cm'
-            'secondary_roots_length', 'exact_skeleton_length', 'exact_skeleton_length_cm'
-            'branch_count', 'endpoint_count_raw', 'root_count_raw', 'endpoint_count', 'root_count',
+            'main_root_length', 'secondary_roots_length', 'total_root_length',
+            'secondary_roots_length', 'exact_skeleton_length', 'branch_count',
+            'endpoint_count_raw', 'root_count_raw', 'endpoint_count', 'root_count',
             'root_count_attach', 'root_count_raw_cum', 'root_count_cum', 'root_count_attach_cum', 
-            'total_area', 'convex_hull', 'convex_hull_cm', 'convex_area', 'convex_area_cm', 
-            'total_area', 'mean_secondary_angles', 'mean_abs_secondary_angles', 
-            'std_secondary_angles', 'std_abs_secondary_angles'
+            'total_area', 'convex_hull', 'convex_area', 'mean_secondary_angles', 
+            'mean_abs_secondary_angles', 'std_secondary_angles', 'std_abs_secondary_angles'
         ])
         self.plot_combo.currentTextChanged.connect(self.update_plot)
         plot_control.addWidget(self.plot_combo)
