@@ -742,51 +742,58 @@ class RootArchitectureAnalyzer:
                 main_path = []
                 main_path_length = 0.0
         
-        # 2) Si ça n’a pas marché, on revient au comportement classique :
-        #    extrémités les plus éloignées verticalement, puis fallback "plus long chemin"
-        if main_path_length == 0.0 and len(endpoint_coords) >= 2:
-            # CORRECTION FINALE : TOUJOURS partir du HAUT (Y min) vers le BAS (Y max)
-            # En coordonnées image : Y=0 est EN HAUT, donc min(Y)=sommet, max(Y)=bas
+        # 2) Si ca n'a pas marche : chercher dans chaque composante connexe separement.
+        #    Strategie : pour chaque composante, tracer chemin endpoint_haut -> endpoint_bas,
+        #    garder la composante avec la plus grande amplitude verticale.
+        #    Gere le cas ou la segmentation cree un graphe deconnecte.
+        if main_path_length == 0.0 and len(G.nodes) >= 2:
             try:
-                ep = np.asarray(endpoint_coords, dtype=float)
-                if ep.ndim == 2 and ep.shape[0] >= 2:
-                    # Trouver le point le plus HAUT (Y minimum)
-                    top_idx = np.argmin(ep[:, 0])
-                    top_point = ep[top_idx]
-                    
-                    # Trouver le point le plus BAS (Y maximum)
-                    bottom_idx = np.argmax(ep[:, 0])
-                    bottom_point = ep[bottom_idx]
-                    
-                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - top_point))
-                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - bottom_point))
-                else:
-                    start_node = end_node = None
-            except Exception:
-                start_node = end_node = None
-            
-            # Fallback si pas assez d'endpoints
-            if start_node is None or end_node is None:
-                try:
-                    all_nodes = list(G.nodes)
-                    if len(all_nodes) >= 2:
-                        all_nodes_array = np.array(all_nodes, dtype=float)
-                        top_idx = np.argmin(all_nodes_array[:, 0])
-                        bottom_idx = np.argmax(all_nodes_array[:, 0])
-                        start_node = all_nodes[top_idx]
-                        end_node = all_nodes[bottom_idx]
-                except Exception:
-                    pass
-            
-            if start_node is not None and end_node is not None and nx.has_path(G, start_node, end_node):
-                main_path = nx.shortest_path(G, source=start_node, target=end_node, weight="weight")
-                # prolonger jusqu’aux vraies extrémités
-                main_path = self._extend_path_to_endpoints(G, main_path)
-                main_path_length = sum(
-                    np.linalg.norm(np.array(main_path[i]) - np.array(main_path[i-1]))
-                    for i in range(1, len(main_path))
+                best_path = []
+                best_length = 0.0
+                
+                components = sorted(
+                    nx.connected_components(G),
+                    key=lambda comp: max(n[0] for n in comp) - min(n[0] for n in comp),
+                    reverse=True
                 )
-                G.remove_nodes_from(main_path)
+                
+                for comp_nodes in components:
+                    if len(comp_nodes) < 2:
+                        continue
+                    G_comp = G.subgraph(comp_nodes)
+                    nodes_arr = np.array(list(comp_nodes), dtype=float)
+                    
+                    ep_comp = [n for n in comp_nodes if G_comp.degree(n) == 1]
+                    if len(ep_comp) >= 2:
+                        ep_arr = np.array(ep_comp, dtype=float)
+                        s = ep_comp[int(np.argmin(ep_arr[:, 0]))]
+                        e = ep_comp[int(np.argmax(ep_arr[:, 0]))]
+                    else:
+                        s = tuple(nodes_arr[int(np.argmin(nodes_arr[:, 0]))].astype(int))
+                        e = tuple(nodes_arr[int(np.argmax(nodes_arr[:, 0]))].astype(int))
+                    
+                    if s == e or not nx.has_path(G_comp, s, e):
+                        continue
+                    
+                    candidate = nx.shortest_path(G_comp, source=s, target=e, weight="weight")
+                    candidate = self._extend_path_to_endpoints(G_comp, candidate)
+                    candidate_length = sum(
+                        np.linalg.norm(np.array(candidate[idx]) - np.array(candidate[idx-1]))
+                        for idx in range(1, len(candidate))
+                    )
+                    
+                    if candidate_length > best_length:
+                        best_length = candidate_length
+                        best_path = candidate
+                
+                if best_path:
+                    main_path = best_path
+                    main_path_length = best_length
+                    G.remove_nodes_from(main_path)
+            
+            except Exception:
+                pass
+        
         
         
         # ============================
@@ -1876,6 +1883,7 @@ class RootHeatmapWidget(QWidget):
         self.figure.tight_layout()
         self.canvas.draw()
 
+
 class RootArchitectureWindow(QMainWindow):
     """Fenêtre optimisée avec paramètres de performance"""
     
@@ -1889,7 +1897,8 @@ class RootArchitectureWindow(QMainWindow):
         self.default_params  =  { 'closing_radius': 5,
                                   'closing_shape': cv2.MORPH_RECT,
                                   'min_branch_length': 20.0,
-                                  'min_object_size': 500,
+                                  'min_connected_components_area': 0,
+                                  'min_object_size': 200,
                                   'max_connection_dst': 240,
                                   'line_thickness': 5,
                                   'temporal_merge': True,
@@ -2122,8 +2131,8 @@ class RootArchitectureWindow(QMainWindow):
         min_object_size_layout = QHBoxLayout()
         min_object_size_layout.addWidget(QLabel("Minimum object size:"))
         self.min_object_size_spin = QSpinBox()
-        self.min_object_size_spin.setRange(10, 100000)
-        self.min_object_size_spin.setValue(800)
+        self.min_object_size_spin.setRange(0, 100000)
+        self.min_object_size_spin.setValue(200)
         min_object_size_layout.addWidget(self.min_object_size_spin)
         params_layout.addLayout(min_object_size_layout)
         

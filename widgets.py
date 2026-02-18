@@ -1,5 +1,6 @@
 import cv2, os, sys
 import numpy as np
+import numpy.linalg as lg
 
 from skimage.morphology import remove_small_objects
 
@@ -8,14 +9,14 @@ PYQT_VERSION = None
 
 try:
     from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-    from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem
+    from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox
     from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
     PYQT_AVAILABLE = True
     PYQT_VERSION = 6
 except:
     try:
         from PyQt5.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-        from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem
+        from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox
         from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
         PYQT_AVAILABLE = True
         PYQT_VERSION = 5
@@ -39,14 +40,14 @@ class RangeSlider(QSlider):
     
     def low(self):
         return self._low
-
+    
     def setLow(self, low: int):
         self._low = low
         self.update()
-
+    
     def high(self):
         return self._high
-
+    
     def setHigh(self, high: int):
         self._high = high
         self.update()
@@ -354,7 +355,7 @@ class PreviewWidget(QLabel):
         """Définit les coordonnées de sélection (QRect)"""
         self.selection_coords = coords
         
-    def updatePreview(self, red_range, green_range, blue_range, red_invert, green_invert, blue_invert, closing_kernel=None, keep_max_component_only=False, object_size=0):
+    def updatePreview(self, red_range, green_range, blue_range, red_invert, green_invert, blue_invert, closing_kernel=None, keep_max_component_only=False, min_connected_components_area=0, max_centroid_dst=0.0, object_size=0):
         """Met à jour la prévisualisation avec les nouveaux paramètres de seuillage"""
         if self.original_image is None:
             return
@@ -392,7 +393,39 @@ class PreviewWidget(QLabel):
             
             max_label = np.argmax(label_count)
             segmented = np.array(labels == max_label, dtype='uint8') * 255
+        
+        if min_connected_components_area > 0:
+            (n_labels, label_ids, values, centroid)  = cv2.connectedComponentsWithStats(segmented, 8)
+            clean_mask = np.zeros_like(segmented, dtype='uint8')
+            for i in range(1, n_labels):
+                area = values[i, cv2.CC_STAT_AREA]
+                if area > min_connected_components_area:
+                    component_mask = (label_ids == i).astype("uint8") * 255
+                    clean_mask = cv2.bitwise_or(clean_mask, component_mask)
             
+            clean_mask = np.array(clean_mask > 0, dtype='uint8') * 255
+            
+            if max_centroid_dst > 0.0:
+                diff_mask = segmented - clean_mask
+                (n_labels_diff, label_ids_diff, values_diff, centroid_diff)  = cv2.connectedComponentsWithStats(diff_mask, 8)
+                (n_labels_clean, label_ids_clean, values_clean, centroid_clean)  = cv2.connectedComponentsWithStats(clean_mask, 8)
+                
+                dst_centroid = np.zeros([n_labels_diff-1, n_labels_clean-1], dtype='float32')
+                for k in range(1, n_labels_diff):
+                    for l in range(1, n_labels_clean):
+                        dst_centroid[k-1, l-1] = lg.norm(np.abs(centroid_diff[k, :] - centroid_clean[l, :]))
+                
+                min_dst = np.min(dst_centroid, axis=1)
+                
+                idx_keep_comp = np.where(min_dst < max_centroid_dst)[0]
+                new_mask = np.zeros_like(segmented, dtype='uint8')
+                for idx_comp in idx_keep_comp:
+                    comp_mask = (label_ids_diff == idx_comp).astype("uint8") * 255
+                    new_mask = cv2.bitwise_or(new_mask, comp_mask)
+                
+                clean_mask = cv2.bitwise_or(new_mask, clean_mask)
+            
+            segmented = cv2.bitwise_and(segmented, clean_mask)
         
         # Appliquer la suppression de bruit
         if object_size > 0:
@@ -457,7 +490,7 @@ class PreviewWidget(QLabel):
         """Redimensionne proprement le pixmap en gardant le ratio"""
         super().resizeEvent(event)
         self._updateScaledPixmap()
-
+    
     def _updateScaledPixmap(self):
         """Met à jour l'affichage avec la bonne mise à l'échelle"""
         if self.current_pixmap is not None and not self.current_pixmap.isNull():
@@ -490,7 +523,7 @@ class PreviewWidget(QLabel):
 
 
 class EnhancedOptionsWindow(QWidget):
-    def __init__(self, window_title, icons_directory, parent_app=None, init_params=None, window_width=1400, window_height=900):
+    def __init__(self, window_title, icons_directory, parent_app=None, init_params=None, window_width=1400, window_height=1000):
         super().__init__()
         self.window_title = window_title
         self.icons_directory = icons_directory
@@ -515,6 +548,12 @@ class EnhancedOptionsWindow(QWidget):
         self.default_object_size = self.init_params.get('min_object_size', 800)
         self.max_object_size_value = 1e10
         self.min_object_size = self.default_object_size
+        self.default_connected_components_value = self.init_params.get('min_connected_component_area', 0)
+        self.max_min_connected_components_area = 1e6
+        self.min_connected_components_area = self.default_connected_components_value
+        self.default_max_centroid_dst = self.init_params.get('max_centroid_dst', 0.0)
+        self.max_max_centroid_dst = 1e6
+        self.max_centroid_dst = self.default_max_centroid_dst
         self.kernel_shape_dict = {"Rectangle":cv2.MORPH_RECT, "Cross":cv2.MORPH_CROSS, "Ellipse":cv2.MORPH_ELLIPSE}
         self.default_kernel_size = 0
         self.default_kernel_shape_index = 0
@@ -590,6 +629,27 @@ class EnhancedOptionsWindow(QWidget):
         self.keep_max_component_layout.addWidget(self.keep_max_component_checkbox)
         self.remove_outliers_layout.addLayout(self.keep_max_component_layout)
         
+        self.min_connected_components_layout = QHBoxLayout()
+        self.min_connected_components_label = QLabel("Minimum connected components area:")
+        self.min_connected_components_entry = QLineEdit()
+        self.min_connected_components_entry.setValidator(QIntValidator())
+        self.min_connected_components_entry.setText(str(self.default_connected_components_value))
+        self.min_connected_components_entry.editingFinished.connect(self._updateMinimumConnectedComponents)
+        self.min_connected_components_layout.addWidget(self.min_connected_components_label)
+        self.min_connected_components_layout.addWidget(self.min_connected_components_entry)
+        self.remove_outliers_layout.addLayout(self.min_connected_components_layout)
+        
+        self.max_centroid_dst_layout = QHBoxLayout()
+        self.max_centroid_dst_label = QLabel("Maximum centroid distance:")
+        self.max_centroid_dst_spin = QDoubleSpinBox()
+        self.max_centroid_dst_spin.setRange(0.0, self.max_max_centroid_dst)
+        self.max_centroid_dst_spin.setValue(self.default_max_centroid_dst)
+        self.max_centroid_dst_spin.setSingleStep(10.0)
+        self.max_centroid_dst_spin.valueChanged.connect(self._updateMaximumCentroidDistance)
+        self.max_centroid_dst_layout.addWidget(self.max_centroid_dst_label)
+        self.max_centroid_dst_layout.addWidget(self.max_centroid_dst_spin)
+        self.remove_outliers_layout.addLayout(self.max_centroid_dst_layout)
+        
         self.object_size_layout = QHBoxLayout()
         self.object_size_label = QLabel("Minimum object size:")
         self.object_size_entry = QLineEdit()
@@ -627,6 +687,10 @@ class EnhancedOptionsWindow(QWidget):
         
         # Boutons
         button_layout = QHBoxLayout()
+        
+        self.updatePreviewButton = QPushButton("Update preview")
+        self.updatePreviewButton.clicked.connect(self._updatePreview)
+        button_layout.addWidget(self.updatePreviewButton)
         
         self.applyButton = QPushButton("Apply")
         self.applyButton.clicked.connect(self._applySettings)
@@ -758,12 +822,28 @@ class EnhancedOptionsWindow(QWidget):
     def _changeFusionMaskState(self):
         """Met à jour la valeur de la variable associée à l'état de la CheckBox de fusion des masques"""
         self.fusion_previous_masks = self.fusion_previous_masks_checkbox.isChecked()
-        self._updatePreview()
     
     def _updateKeepMaxComponentState(self):
         self.keep_max_component_only = self.keep_max_component_checkbox.isChecked()
-        # Mettre à jour la prévisualisation
-        self._updatePreview()
+    
+    def _updateMinimumConnectedComponents(self):
+        """Met à jour la valeur de l'aire minimale des composantes connexes"""
+        try:
+            entry_value = int(self.min_connected_components_entry.text())
+            min_area = max(0, min(self.max_min_connected_components_area, entry_value))
+            if min_area != entry_value:
+                self.min_connected_components_entry.setText(str(self.min_connected_components_area))
+            
+            self.min_connected_components_area = min_area
+        except:
+            print("Error: a positive integer is expected for the value of the minimum area of the connected components.")
+    
+    def _updateMaximumCentroidDistance(self):
+        """Met à jour la valeur de la distance maximale entre centroides des composantes connexes restantes et celles supprimées car d'aires trop petites"""
+        try:
+            self.max_centroid_dst = self.max_centroid_dst_spin.value()
+        except:
+            print("Error: a positive float is expected for the value of the minimum distance between centroids of connected components.")
     
     def _updateObjectSizeValue(self):
         """Met à jour la valeur de la taille minimum des objets"""
@@ -774,8 +854,6 @@ class EnhancedOptionsWindow(QWidget):
                 self.object_size_entry.setText(str(self.min_object_size))
             
             self.min_object_size = min_size
-            # Mettre à jour la prévisualisation
-            self._updatePreview()
         except:
             print("Error: a strictly positive integer is expected for the value of the minimum size of objects.")
     
@@ -790,8 +868,6 @@ class EnhancedOptionsWindow(QWidget):
             self.kernel_size = (ksize, ksize)
             # Mis à jour du noyau
             self._updateClosingKernel()
-            # Mettre à jour la prévisualisation
-            self._updatePreview()
         except:
             print("Error: a strictly positive integer is expected for the value of the closing kernel size.")
     
@@ -803,8 +879,6 @@ class EnhancedOptionsWindow(QWidget):
         self.kernel_shape_value = self.kernel_shape_dict[shape_name]
         # Mis à jour du noyau
         self._updateClosingKernel()
-        # Mettre à jour la prévisualisation
-        self._updatePreview()
     
     def _updateClosingKernel(self):
         """Met à jour le noyau pour l'opération morphologique de fermeture"""
@@ -824,6 +898,8 @@ class EnhancedOptionsWindow(QWidget):
             self.blue_inverted_values,
             closing_kernel=self.closing_kernel,
             keep_max_component_only=self.keep_max_component_only,
+            min_connected_components_area=self.min_connected_components_area,
+            max_centroid_dst=self.max_centroid_dst,
             object_size=self.min_object_size
         )
     

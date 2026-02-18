@@ -1,6 +1,7 @@
 import cv2, os, sys
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.linalg as lg
 import pandas as pd
 import seaborn as sns
 import tifffile as tiff
@@ -257,6 +258,39 @@ class ProcessingWorker(QThread):
                 max_label = np.argmax(label_count)
                 binary_image = np.array(labels == max_label, dtype='uint8') * 255
             
+            if params['min_connected_components_area'] > 0:
+                (n_labels, label_ids, values, centroid)  = cv2.connectedComponentsWithStats(binary_image, 8)
+                clean_mask = np.zeros_like(binary_image, dtype='uint8')
+                for j in range(1, n_labels):
+                    area = values[j, cv2.CC_STAT_AREA]
+                    if area > params['min_connected_components_area']:
+                        component_mask = (label_ids == j).astype("uint8") * 255
+                        clean_mask = cv2.bitwise_or(clean_mask, component_mask)
+                
+                clean_mask = np.array(clean_mask > 0, dtype='uint8') * 255
+                
+                if params['max_centroid_dst'] > 0.0:
+                    diff_mask = binary_image - clean_mask
+                    (n_labels_diff, label_ids_diff, values_diff, centroid_diff)  = cv2.connectedComponentsWithStats(diff_mask, 8)
+                    (n_labels_clean, label_ids_clean, values_clean, centroid_clean)  = cv2.connectedComponentsWithStats(clean_mask, 8)
+                    
+                    dst_centroid = np.zeros([n_labels_diff-1, n_labels_clean-1], dtype='float32')
+                    for k in range(1, n_labels_diff):
+                        for l in range(1, n_labels_clean):
+                            dst_centroid[k-1, l-1] = lg.norm(np.abs(centroid_diff[k, :] - centroid_clean[l, :]))
+                    
+                    min_dst = np.min(dst_centroid, axis=1)
+                    
+                    idx_keep_comp = np.where(min_dst < params['max_centroid_dst'])[0]
+                    new_mask = np.zeros_like(image, dtype='uint8')
+                    for idx_comp in idx_keep_comp:
+                        comp_mask = (label_ids_diff == idx_comp).astype("uint8") * 255
+                        new_mask = cv2.bitwise_or(new_mask, comp_mask)
+                    
+                    clean_mask = cv2.bitwise_or(new_mask, clean_mask)
+                
+                binary_image = cv2.bitwise_and(binary_image, clean_mask)
+            
             # Suppression du bruit
             if params['min_object_size'] > 0:
                 binary_image = remove_small_objects(
@@ -450,7 +484,9 @@ class AnalysisConfig:
                                             'min_branch_length': 20.0,
                                             'max_connection_dst': 240,
                                             'keep_max_component': False,
-                                            'min_object_size': 800,
+                                            'min_connected_components_area': 0,
+                                            'max_centroid_dst': 0.0,
+                                            'min_object_size': 200,
                                             'kernel_size': 5,
                                             'kernel_shape': cv2.MORPH_RECT,
                                             'fusion_masks': True
@@ -711,10 +747,12 @@ class App(QWidget):
                 'blue_invert': False,
                 'min_branch_length': 10.0,
                 'keep_max_component': False,
+                'min_connected_components_area': 0,
+                'max_centroid_dst': 0,
                 'min_object_size': 0,
                 'kernel_size': 0,
                 'kernel_shape': cv2.MORPH_RECT,
-                'fusion_masks' : True
+                'fusion_masks' : False
             }),
             "leaves": AnalysisConfig("Leaves", self.leaves_checkbox_analysis_state, {
                 'red_range': (0, 255),
@@ -725,6 +763,8 @@ class App(QWidget):
                 'blue_invert': False,
                 'min_branch_length': 10.0,
                 'keep_max_component': False,
+                'min_connected_components_area': 0,
+                'max_centroid_dst': 0,
                 'min_object_size': 0,
                 'kernel_size': 0,
                 'kernel_shape': cv2.MORPH_RECT,
@@ -735,6 +775,8 @@ class App(QWidget):
                                           'closing_shape': cv2.MORPH_RECT,
                                           'min_branch_length': 10.0,
                                           'keep_max_component': False,
+                                          'min_connected_components_area': 0,
+                                          'max_centroid_dst': 0,
                                           'min_object_size': 0,
                                           'line_thickness': 5,
                                           'temporal_merge': True,
@@ -1726,6 +1768,9 @@ class App(QWidget):
         self.threshold_window.green_invert_checkbox.setChecked(params['green_invert'])
         self.threshold_window.blue_invert_checkbox.setChecked(params['blue_invert'])
         
+        # Configurer l'aire minimale des composantes connexes
+        self.threshold_window.min_connected_components_area = params['min_connected_components_area']
+        
         # Configurer la taille d'objet minimum
         self.threshold_window.min_object_size = params['min_object_size']
         self.threshold_window.object_size_entry.setText(str(params['min_object_size']))
@@ -1755,6 +1800,7 @@ class App(QWidget):
             'green_invert': invert_green,
             'blue_invert': invert_blue,
             'keep_max_component': getattr(self.threshold_window, 'keep_max_component', False),
+            'min_connected_components_area': getattr(self.threshold_window, 'min_connected_components_area', 0),
             'min_object_size': getattr(self.threshold_window, 'min_object_size', 0),
             'kernel_size': getattr(self.threshold_window, 'kernel_size', 5),
             'kernel_shape': getattr(self.threshold_window, 'kernel_shape_value', cv2.MORPH_RECT),
@@ -1775,6 +1821,7 @@ class App(QWidget):
         self.cleaning_mask_parameters['closing_shape'] = params['kernel_shape']
         self.cleaning_mask_parameters['min_branch_length'] = params['min_branch_length']
         self.cleaning_mask_parameters['keep_max_component'] = params['keep_max_component']
+        self.cleaning_mask_parameters['min_connected_components_area'] = params['min_connected_components_area']
         self.cleaning_mask_parameters['min_object_size'] = params['min_object_size']
         self.cleaning_mask_parameters['line_thickness'] = 5
         self.cleaning_mask_parameters['temporal_merge'] = params['fusion_masks']
