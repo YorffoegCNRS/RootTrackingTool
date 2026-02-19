@@ -9,21 +9,21 @@ PYQT_VERSION = None
 
 try:
     from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-    from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox
+    from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox, QScrollArea
     from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
     PYQT_AVAILABLE = True
     PYQT_VERSION = 6
 except:
     try:
         from PyQt5.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-        from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox
+        from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem, QDoubleSpinBox, QScrollArea
         from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
         PYQT_AVAILABLE = True
         PYQT_VERSION = 5
     except:
         print("This script requires PyQt5 or PyQt6 to run. Neither of these versions was found!")
 
-
+from utils import *
 
 class RangeSlider(QSlider):
     """Range slider personnalisé"""
@@ -424,7 +424,7 @@ class PreviewWidget(QLabel):
                     new_mask = cv2.bitwise_or(new_mask, comp_mask)
                 
                 clean_mask = cv2.bitwise_or(new_mask, clean_mask)
-            
+            clean_mask
             segmented = cv2.bitwise_and(segmented, clean_mask)
         
         # Appliquer la suppression de bruit
@@ -576,14 +576,49 @@ class EnhancedOptionsWindow(QWidget):
         # Panel de gauche (contrôles) - taille fixe
         left_panel = self._createControlPanel()
         left_panel.setFixedWidth(400)  # Largeur fixe pour les contrôles
-        main_layout.addWidget(left_panel)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        try:
+            left_scroll.setFrameShape(QScrollArea.Shape.NoFrame if PYQT_VERSION == 6 else QScrollArea.NoFrame)
+        except Exception:
+            pass
+        
+        left_scroll.setWidget(left_panel)
+        
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = Qt.FocusPolicy.StrongFocus if hasattr(Qt, "FocusPolicy") else Qt.StrongFocus
+        for w in left_panel.findChildren((QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
+        
+        # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
+        try:
+            left_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VERSION == 6 else Qt.ScrollBarAlwaysOff
+            )
+        except Exception:
+            pass
+        
+        # On garde une largeur stable pour le panneau de gauche (incluant une éventuelle scrollbar)
+        try:
+            left_scroll.setMinimumWidth(420)
+        except Exception:
+            pass
+        
+        main_layout.addWidget(left_scroll)
         
         # Panel de droite (prévisualisation) - extensible
         right_panel = self._createPreviewPanel()
         main_layout.addWidget(right_panel)
         
         # Proportions : contrôles fixes, prévisualisation extensible
-        main_layout.setStretchFactor(left_panel, 0)  # Pas d'étirement
+        main_layout.setStretchFactor(left_scroll, 0)  # Pas d'étirement
         main_layout.setStretchFactor(right_panel, 1)  # S'étire pour remplir l'espace
     
     def _createControlPanel(self):
@@ -611,9 +646,14 @@ class EnhancedOptionsWindow(QWidget):
         layout.addWidget(blue_group)
         
         # Remove outliers part
+        # Séparateur
+        h_separator = QFrame()
+        h_separator.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        layout.addWidget(h_separator)
+        
         remove_outliers_title = QLabel("Remove Outliers")
-        remove_outliers_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        remove_outliers_title.setAlignment(Qt.AlignmentFlag.AlignLeft if PYQT_VERSION == 6 else Qt.AlignLeft)
+        remove_outliers_title.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        remove_outliers_title.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
         layout.addWidget(remove_outliers_title)
         
         self.remove_outliers_layout = QVBoxLayout()
@@ -662,7 +702,7 @@ class EnhancedOptionsWindow(QWidget):
         
         self.kernelSizeLayout = QHBoxLayout()
         self.closing_kernel_label = QLabel("Morphological operation kernel:")
-        self.closing_kernel_label.setFont(QFont("Arial", 8, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        self.closing_kernel_label.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
         self.kernel_size_label = QLabel("Closing kernel size:")
         self.kernel_size_field = QLineEdit()
         self.kernel_size_field.setValidator(QIntValidator())

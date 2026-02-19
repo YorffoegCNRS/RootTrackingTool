@@ -18,14 +18,14 @@ PYQT_AVAILABLE = False
 PYQT_VERSION = None
 
 try:
-    from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
+    from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, QObject, pyqtSlot
     from PyQt6.QtWidgets import QApplication, QWidget, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
     from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence, QAction
     PYQT_AVAILABLE = True
     PYQT_VERSION = 6
 except:
     try:
-        from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
+        from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, QObject, pyqtSlot
         from PyQt5.QtWidgets import QApplication, QWidget, QAction, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
         from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence
         PYQT_AVAILABLE = True
@@ -799,11 +799,21 @@ class App(QWidget):
         self.default_output_directory = os.path.join(self.current_directory, "Analysis")
         os.makedirs(self.default_output_directory, exist_ok=True)
         
-        # Icons
-        self.icon_size = (32, 32)
-        self.logo_file_name = "logo_rtt.png"
-        self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
-        self.logo_pixmap = QPixmap(self.logo_file_path)
+        # Logo
+        self.logo_max_width = 280
+        if PYQT_VERSION == 6:
+            self.logo_file_name = "logo_rtt_2.png"
+            self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+            if os.path.exists(self.logo_file_path):
+                self.logo_pixmap = QPixmap(self.logo_file_path)
+            else:
+                self.logo_file_name = "logo_rtt.png"
+                self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+                self.logo_pixmap = QPixmap(self.logo_file_path)
+        else:
+            self.logo_file_name = "logo_rtt.png"
+            self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+            self.logo_pixmap = QPixmap(self.logo_file_path)
         
         self.logo_start_file_name = "logo_start.png"
         self.logo_start_file_path = os.path.join(self.icons_directory, self.logo_start_file_name)
@@ -839,6 +849,27 @@ class App(QWidget):
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame if PYQT_VERSION == 6 else QFrame.NoFrame)
         left_scroll.setWidget(left_panel)
+        
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = Qt.FocusPolicy.StrongFocus if hasattr(Qt, "FocusPolicy") else Qt.StrongFocus
+        for w in left_panel.findChildren((QSpinBox, QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
+        
+        # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
+        try:
+            left_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VERSION == 6 else Qt.ScrollBarAlwaysOff
+            )
+        except Exception:
+            pass
+        
         # Empêche le panneau de gauche d'être écrasé verticalement : on scroll au lieu de compresser
         left_scroll.setMinimumWidth(320)
         splitter.addWidget(left_scroll)
@@ -1052,11 +1083,21 @@ class App(QWidget):
         separator4.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
         layout.addWidget(separator4)
         
+        # --- Logo centré et responsive ---
         self.logo_label = QLabel()
-        self.logo_label.setPixmap(self.logo_pixmap.scaledToWidth(300))
-        layout.addWidget(self.logo_label, Qt.AlignmentFlag.AlignBottom if PYQT_VERSION == 6 else Qt.AlignBottom)
+        self.logo_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter
+        )
+        
+        # Important : ne pas fixer directement scaledToWidth ici
+        self.logo_label.setPixmap(self.logo_pixmap)
         
         layout.addStretch()
+        layout.addWidget(self.logo_label)
+        
+        # Forcer une mise à jour au resize
+        panel.installEventFilter(self)
+        
         return panel
     
     def _createRightPanel(self):
@@ -1108,7 +1149,31 @@ class App(QWidget):
         
         return widget
     
-    # NOUVELLE MÉTHODE: Confirmation de sélection
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.Resize:
+            self.updateLogoSize()
+        return super().eventFilter(obj, event)
+    
+    def updateLogoSize(self):
+        """Redimensionne le logo pour qu’il reste centré et adaptatif"""
+        if not hasattr(self, "logo_label") or self.logo_pixmap is None:
+            return
+        
+        # Largeur disponible dans le panneau gauche
+        available_width = self.logo_label.parent().width()
+        
+        # Taille finale = min(largeur panneau, max)
+        target_width = min(self.logo_max_width, available_width - 30)
+        
+        scaled = self.logo_pixmap.scaledToWidth(
+            target_width,
+            Qt.TransformationMode.SmoothTransformation
+            if PYQT_VERSION == 6 else Qt.SmoothTransformation
+        )
+        
+        self.logo_label.setPixmap(scaled)
+    
+    # Confirmation de sélection
     def confirmSelection(self, analysis_type):
         """Confirme et sauvegarde la sélection pour un type d'analyse"""
         # Si aucun sélection, on garde l'entièreté de l'image
@@ -2109,9 +2174,9 @@ class ApplicationWindow(QMainWindow):
         self.setCentralWidget(self.mainWidget)
         
         # Icons
-        self.logo_menu_file_name = "logo_menu.png"
-        self.logo_menu_file_path = os.path.join(self.icons_directory, self.logo_menu_file_name)
-        self.setWindowIcon(QIcon(self.logo_menu_file_path))
+        self.icon_menu_file_name = "IconRTT.png"
+        self.icon_menu_file_path = os.path.join(self.icons_directory, self.icon_menu_file_name)
+        self.setWindowIcon(QIcon(self.icon_menu_file_path))
         
         # Menu
         self._createMenuBar()
