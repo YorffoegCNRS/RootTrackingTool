@@ -1058,8 +1058,8 @@ class App(QWidget):
         layout.addLayout(actions_layout)
         
         # Séparateur
-        separator3 = QFrame()
-        separator3.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        separator4 = QFrame()
+        separator4.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
         layout.addWidget(separator3)
         
         # Navigation
@@ -1079,9 +1079,9 @@ class App(QWidget):
         layout.addWidget(self.imageIndexLabel)
         
         # Logo
-        separator4 = QFrame()
-        separator4.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
-        layout.addWidget(separator4)
+        separator5 = QFrame()
+        separator5.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        layout.addWidget(separator5)
         
         # --- Logo centré et responsive ---
         self.logo_label = QLabel()
