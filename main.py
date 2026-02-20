@@ -1173,6 +1173,7 @@ class App(QWidget):
         
         self.logo_label.setPixmap(scaled)
     
+    
     # Confirmation de sélection
     def confirmSelection(self, analysis_type):
         """Confirme et sauvegarde la sélection pour un type d'analyse"""
@@ -2159,7 +2160,7 @@ class ApplicationWindow(QMainWindow):
         super(ApplicationWindow, self).__init__()
         self.screen = screen
         self.screen_size = [self.screen.size().width(), self.screen.size().height()]
-        self.max_main_window_size = [1800, 1300]
+        self.max_main_window_size = [1600, 1000]
         self.main_geometry = [0, 0, min(int(self.screen_size[0] * 0.9), self.max_main_window_size[0]), min(int(self.screen_size[1] * 0.9), self.max_main_window_size[1])]
         self.main_geometry[0] = min(100, self.screen_size[0] - self.main_geometry[2])
         self.main_geometry[1] = min(100, self.screen_size[1] - self.main_geometry[3])
