@@ -94,7 +94,7 @@ class RangeSlider(QSlider):
     def mouseMoveEvent(self, event):
         if event.buttons() & (Qt.MouseButton.LeftButton if PYQT_VERSION ==6 else Qt.LeftButton):
             total_width = self.width() - 20
-            click_pos = event.x() - 10
+            click_pos = event.pos().x() - 10
             value = max(0, min(255, int((click_pos / total_width) * 255)))
             
             if self.active_slider == 0:
