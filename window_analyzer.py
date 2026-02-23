@@ -2168,7 +2168,7 @@ class RootArchitectureWindow(QMainWindow):
         exec_group = QGroupBox("Execute")
         exec_layout = QVBoxLayout()
         
-        self.run_btn = QPushButton("🚀 Start analysis")
+        self.run_btn = QPushButton("Analyze current dataset")
         self.run_btn.clicked.connect(self.run_analysis)
         self.run_btn.setEnabled(False)
         self.run_btn.setStyleSheet("""
@@ -2185,7 +2185,7 @@ class RootArchitectureWindow(QMainWindow):
         """)
         exec_layout.addWidget(self.run_btn)
         
-        self.batch_btn = QPushButton("Process all datasets")
+        self.batch_btn = QPushButton("Analyze selected datasets")
         self.batch_btn.clicked.connect(self.batch_process_all_datasets)
         self.batch_btn.setStyleSheet("""
             QPushButton { 
