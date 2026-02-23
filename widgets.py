@@ -74,7 +74,7 @@ class RangeSlider(QSlider):
     
     def mousePressEvent(self, event):
         total_width = self.width() - 20
-        click_pos = event.x() - 10
+        click_pos = event.pos().x() - 10
         value = int((click_pos / total_width) * 255)
         
         low_pos = int((self._low / 255) * total_width)
@@ -92,7 +92,7 @@ class RangeSlider(QSlider):
         self.sliderMoved.emit(self._low, self._high)
     
     def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.LeftButton:
+        if event.buttons() & (Qt.MouseButton.LeftButton if PYQT_VERSION ==6 else Qt.LeftButton):
             total_width = self.width() - 20
             click_pos = event.x() - 10
             value = max(0, min(255, int((click_pos / total_width) * 255)))
