@@ -1,3 +1,13 @@
+import warnings
+
+# Supprime l'affichage potentiel de message 'warnnings' pouvant apparaître avec certaines combinaisons comme Python 3.9 + PyQt6 < 6.6.0
+warnings.filterwarnings(
+    "ignore",
+    message="sipPyTypeDict\\(\\) is deprecated",
+    category=DeprecationWarning,
+)
+
+
 import cv2, os, sys
 import matplotlib.pyplot as plt
 import numpy as np
