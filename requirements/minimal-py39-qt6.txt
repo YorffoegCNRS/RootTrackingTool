@@ -1,0 +1,13 @@
+imagecodecs
+matplotlib
+networkx
+numpy
+opencv-python
+pandas
+PyQt6==6.6.1
+PyQt6-Qt6==6.6.1
+PyQt6-sip==13.10.2
+scikit-image
+scipy
+seaborn
+tifffile
