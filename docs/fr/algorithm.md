@@ -1,7 +1,7 @@
 # RTT : Algorithm
 
 * 🇫🇷 Version française
-* 🇬🇧 [English version](docs/en/algorithm.md)
+* 🇬🇧 [English version](../en/algorithm.md)
 
 
 ## Architecture
@@ -195,4 +195,5 @@ Soit N le nombre de pixels du squelette, E le nombre d'arêtes du graphe (E ≈ 
 - **Bifurcations multiples** : BFS garantit la sélection de l'endpoint le plus extrême.
 - **Jours manquants** : persistance de la référence temporelle du dernier jour réussi.
 - **Déviations latérales** : BFS explore toutes les directions pour atteindre l'extrémité globale.
+
 
