@@ -1,7 +1,7 @@
 # RTT : Algorithm
 
-🇬🇧 English version (default)
-🇫🇷 [Version française](docs/fr/algorithm.md)
+* 🇬🇧 English version (default)
+* 🇫🇷 [Version française](../fr/algorithm.md)
 
 
 ## Architecture
@@ -181,3 +181,4 @@ Let N be the number of pixels in the skeleton, E the number of edges in the grap
 - **Multiple bifurcations**: BFS guarantees selection of the most extreme endpoint.
 - **Missing days**: persistence of the time reference from the last successful day.
 - **Lateral deviations**: BFS explores all directions to reach the global endpoint.
+
