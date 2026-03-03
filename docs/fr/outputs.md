@@ -1,7 +1,7 @@
 # RTT : outputs
 
 * 🇫🇷 Version française
-* 🇬🇧 [English version](docs/en/outputs.md)
+* 🇬🇧 [English version](../en/outputs.md)
 
 
 ## 1\. Format attendu des noms d'images
@@ -190,4 +190,5 @@ Si le facteur d'échelle du nombre de pixels par centimètre a été renseigné 
   Cette méthode correspond à une métrique 8-connexe pondérée permettant une approximation fidèle de la longueur euclidienne en espace discret.
 
 Les deux mesures sont exprimées en pixels. 
+
 Si le paramètre pixels/cm est défini, des colonnes supplémentaires suffixées `_cm` sont ajoutées, elles remplacent les pixels par des centimètres et les pixels² par des cm².
