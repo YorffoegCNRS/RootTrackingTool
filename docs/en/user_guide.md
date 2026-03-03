@@ -1,7 +1,7 @@
 # RTT : User guide
 
 * 🇬🇧 English version (default)
-* 🇫🇷 [Version française](docs/fr/user_guide.md)
+* 🇫🇷 [Version française](../fr/user_guide.md)
 
 
 ## User guide
@@ -77,3 +77,4 @@ If you have already completed Part 1 on your datasets, you can proceed to Part 2
 3. Results exported in CSV format can be viewed via the ***Results*** tab.
 4. A graphical representation of the evolution of the different variables can be displayed via the ***Graphs*** tab.
 5. The evolution of root length in each subsection of the image (in X rows and Y columns chosen before starting the advanced analysis) can be displayed in the ***Heatmap*** tab. Several visualization parameters are available: unit, color codes, color inversion, and day change.
+
