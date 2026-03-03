@@ -1,5 +1,11 @@
 # RTT : outputs
 
+* 🇫🇷 Version française
+* 🇬🇧 [English version](docs/en/outputs.md)
+
+
+## 1\. Format attendu des noms d'images
+
 RTT exporte des mesures structurées autour de variables communes permettant de relier chaque observation à son contexte : Dataset, Image name, Modality, Day. Ces données sont directement extraites des noms de fichiers qui doivent donc suivre un format particulier pour que le programme puisse les extraire correctement. Le nom du jeu de données est lui directement tiré du nom du dossier parent de chaque jeu d'images.
 
 ```text
@@ -16,7 +22,7 @@ DS_01_input_d20.tiff
 
 
 
-## 1\. Résultats de l'analyse rapide des racines et des feuilles
+## 2\. Résultats de l'analyse rapide des racines et des feuilles
 
 
 La première partie du programme, dont le rôle est la segmentation des images et la préparation des masques permettant une analyse avancée du système racinaire dans sa seconde partie, permet quand même une analyse racinaire et/ou foliaire rapide. Après avoir sélectionné les dossiers à traiter, le dossier de sortie, les zones d'intérêt et segmenter les racines/feuilles, un fichier CSV sera automatiquement exporté. Supposons que nous travaillons sur un dataset nommé DS_01, que le dossier de sortie est le dossier par défaut Analysis, alors nous aurons l'arborescence de fichiers suivante :
@@ -71,7 +77,7 @@ Les dossiers **Leaves** et **Roots** ainsi que leurs sous-dossiers sont automati
 * Day : index du jour
 
 
-## 2\. Résultats de l'analyse du système racinaire
+## 3\. Résultats de l'analyse du système racinaire
 
 Deux modes d’export sont possibles :
 
@@ -145,7 +151,7 @@ Les variables suffixées `_cum` correspondent aux valeurs cumulées temporelleme
 | exact_skeleton_length | float | px | Longueur exacte du squelette (métrique 8-connexe pondérée) | Voir section ci-dessous |
 | main_root_length | float | px | Longueur de la racine principale | |
 | mean_secondary_angles | float | ° | Moyenne des valeurs des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
-| mean_abs_secondary_angles | float | ° | Moyenne des valeurs des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
+| mean_abs_secondary_angles | float | ° | Moyenne des valeurs absolues des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
 | root_count | int | - | Nombre de racines secondaires après élagage | = endpoint_count - 1 |
 | root_count_cum | int | - | Identique à root_count mais valeur cumulée dans le temps (ne peut jamais diminuer entre deux jours successifs) | Evite la perte de racines |
 | root_count_attach | int | - | Nombre de racines secondaires partant de la racine principale | |
@@ -155,7 +161,7 @@ Les variables suffixées `_cum` correspondent aux valeurs cumulées temporelleme
 | scale | float | - | Facteur de redimensionnement de l'image pour la visualisation | Redimensionnement de facteur 1/scale |
 | secondary_root_length | float | px | Longueur cumulée des racines secondaires | |
 | std_secondary_angles | float | ° | Ecart-type des valeurs des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
-| std_abs_secondary_angles | float | ° | Ecart-type des valeurs des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
+| std_abs_secondary_angles | float | ° | Ecart-type des valeurs absolues des angles mesurés entre la direction locale de la racine principale et de la direction initiale de chaque racine secondaire | Angles en degré (°) |
 | total_area | float | px² | Surface totale du système racinaire | |
 | total_root_length | float | px | Longueur totale approximée du graphe | Peut sous-estimer |
 

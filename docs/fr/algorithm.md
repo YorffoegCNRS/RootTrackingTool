@@ -1,5 +1,9 @@
 # RTT : Algorithm
 
+* 🇫🇷 Version française
+* 🇬🇧 [English version](docs/en/algorithm.md)
+
+
 ## Architecture
 
 RTT est organisé en deux modules principaux, correspondant à deux étapes de traitement complémentaires : (i) segmentation/nettoyage des masques issus d’Ilastik, puis (ii) analyse avancée du réseau racinaire par squelettisation et analyse de graphe.

@@ -1,5 +1,9 @@
 # RTT : Parameters
 
+* 🇫🇷 Version française
+* 🇬🇧 [English version](docs/en/parameters.md)
+
+
 ## 1. Paramètres – Segmentation (Partie I)
 
 

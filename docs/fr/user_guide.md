@@ -1,5 +1,9 @@
 # RTT : User guide
 
+* 🇫🇷 Version française
+* 🇬🇧 [English version](docs/en/user_guide.md)
+
+
 ## Guide d'utilisation
 
 Le fonctionnement du programme peut être décomposé en deux grandes étapes :
