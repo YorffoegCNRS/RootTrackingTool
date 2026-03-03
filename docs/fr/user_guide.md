@@ -1,7 +1,7 @@
 # RTT : User guide
 
 * 🇫🇷 Version française
-* 🇬🇧 [English version](docs/en/user_guide.md)
+* 🇬🇧 [English version](../en/user_guide.md)
 
 
 ## Guide d'utilisation
@@ -76,4 +76,5 @@ Si vous avez déjà effectué la partie sur vos jeux de données, vous pouvez pa
 2. Une fois l'analyse terminée, il est possible de passer d'un jeu de données à l'autre en cliquant dessus dans le menu de gauche. Il est possible de voir l'évolution du graphe racinaire d'un jeu de données via l'onglet ***Visualization*** en faisant défiler la barre des jours ***Day*** en haut.
 3. Les résultats exportés au format CSV peuvent être visualisés via l'onglet ***Results***.
 4. La représentation graphique de l'évolution des différentes variables peut être affichée via l'onglet ***Graphs***.
+
 5. L'évolution de la longueur des racines dans chaque sous-section de l'image (en X lignes et Y colonnes choisies avant le démarrage de l'analyse avancée) peut être affichée dans l'onglet ***Heatmap***. Quelques paramètres de visualisation y sont présents : unité, codes couleurs, inversion des couleurs, changement des jours.
