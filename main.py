@@ -1,12 +1,11 @@
 import warnings
 
-# Supprime l'affichage potentiel de message 'warnnings' pouvant apparaître avec certaines combinaisons comme Python 3.9 + PyQt6 < 6.6.0
+# Suppression des "warnings" potentiels avec certaines combinaisons de Python et PyQt (par exemple Python 3.9 et PyQt6 < 6.6.0)
 warnings.filterwarnings(
     "ignore",
     message="sipPyTypeDict\\(\\) is deprecated",
     category=DeprecationWarning,
 )
-
 
 import cv2, os, sys
 import matplotlib.pyplot as plt
@@ -243,7 +242,7 @@ class ProcessingWorker(QThread):
                 if idx == 0:
                     image_moda = name_part
                 else:
-                    if name_part[0].lower() == 'j':
+                    if name_part[0].lower() in ['j', 'd']:
                         image_day = int(name_part[1:])
             
             # Charger et traiter l'image
