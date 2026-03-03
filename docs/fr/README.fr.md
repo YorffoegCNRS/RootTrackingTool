@@ -1,7 +1,7 @@
 # Root Tracking Tool : Readme
 
 * 🇫🇷 Version française
-* 🇬🇧 [English version](docs/en/README.md)
+* 🇬🇧 [English version](../en/README.md)
 
 
 ### Table des matières
@@ -408,4 +408,5 @@ Les axes de développement actuellement envisagés pour RTT incluent :
 * Pipeline complet : image brute → segmentation → analyse
 
 **Objectif :** rendre RTT indépendant d'un logiciel externe de segmentation
+
 
