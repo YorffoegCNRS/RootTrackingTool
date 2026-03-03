@@ -1,7 +1,7 @@
 # RTT : Parameters
 
 * 🇬🇧 English version (default)
-* 🇫🇷 [Version française](docs/fr/parameters.md)
+* 🇫🇷 [Version française](../fr/parameters.md)
 
 
 ## 1. Parameters – Segmentation (Part I)
@@ -325,4 +325,5 @@ Analysis performed on images measuring 3300x4550 once cropped.
 - temporal_merge : True
 - connect_objects : True
 - grid_rows : 3
+
 - grid_cols : 2
