@@ -1,16 +1,16 @@
-# Root Tracking Tool
+# Root Tracking Tool : Readme
 
 
 ### Table des matières
 
-- [Root Tracking Tool](#root-tracking-tool)
+- [Root Tracking Tool : Readme](#root-tracking-tool--readme)
     - [Table des matières](#table-des-matières)
   - [Description](#description)
   - [Fonctionnalités principales](#fonctionnalités-principales)
   - [Compatibilité](#compatibilité)
   - [Installation](#installation)
-    - [Option A : installation rapide (Recommandé)](#option-a--installation-rapide-recommandé)
-      - [Avec PyQt6 et Python 3.10 ou supérieur (Recommandé)](#avec-pyqt6-et-python-310-ou-supérieur-recommandé)
+    - [Option A : installation minimale (recommandé)](#option-a--installation-minimale-recommandé)
+      - [Avec PyQt6 et Python 3.10 ou supérieur (recommandé)](#avec-pyqt6-et-python-310-ou-supérieur-recommandé)
       - [Avec PyQt6 et Python 3.9](#avec-pyqt6-et-python-39)
       - [Avec PyQt5](#avec-pyqt5)
     - [Option B : Environnement verrouillé (Reproductible)](#option-b--environnement-verrouillé-reproductible)
@@ -68,7 +68,7 @@ Le développement principal a été réalisé sous Python 3.14, qui est la versi
 
 
 
-### Option A : installation rapide (Recommandé)
+### Option A : installation minimale (recommandé)
 
 Cette méthode installe uniquement les dépendances nécessaires.
 
@@ -79,8 +79,7 @@ Cette méthode installe uniquement les dépendances nécessaires.
 
 
 
-#### Avec PyQt6 et Python 3.10 ou supérieur (Recommandé)
-
+#### Avec PyQt6 et Python 3.10 ou supérieur (recommandé)
 
 
 **Windows**
@@ -94,7 +93,6 @@ pip install -r requirements/minimal-qt6.txt
 ```
 
 
-
 **Linux/macOS**
 
 ```
@@ -104,7 +102,6 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements/minimal-qt6.txt
 ```
-
 
 
 #### Avec PyQt6 et Python 3.9
@@ -248,6 +245,7 @@ RTT/
 │   ├── IconRTT.png           # Icône utilisé dans la barre des tâches
 │   ├── logo_rtt.png          # Logo utilisé pour la version PyQt5 du programme
 │   ├── logo_rtt_2.png        # Logo utilisé pour la version PyQt6 du programme
+│   ├── logo_start.png        # Icône actuellement inutilisé
 │
 ├── requirements/             # Dossier contenant les fichiers "requirements.txt" pour la création d'environnement 'minimal' ou 'verrouillé' permettant l'exécution du programme
 │   ├── lock-py39-qt5.txt     # Fichier 'requirements' pour la création d'un environnement verrouillé avec Python 3.9 et PyQt5
@@ -262,9 +260,9 @@ RTT/
 │   ├── lock-py313-qt6.txt    # Fichier 'requirements' pour la création d'un environnement verrouillé avec Python 3.13 et PyQt6
 │   ├── lock-py314-qt5.txt    # Fichier 'requirements' pour la création d'un environnement verrouillé avec Python 3.14 et PyQt5
 │   ├── lock-py314-qt6.txt    # Fichier 'requirements' pour la création d'un environnement verrouillé avec Python 3.14 et PyQt6
-│   ├── minimal-py39-qt6.txt  # Fichier 'requirements' pour la création d'un environnement minimal avec PyQt6
-│   ├── minimal-qt5.txt       # Fichier 'requirements' pour la création d'un environnement minimal avec PyQt5
-│   ├── minimal-qt6.txt       # Fichier 'requirements' pour la création d'un environnement minimal avec PyQt6
+│   ├── minimal-py39-qt6.txt  # Fichier 'requirements' pour la création d'un environnement minimal avec Python 3.9 et PyQt6
+│   ├── minimal-qt5.txt       # Fichier 'requirements' pour la création d'un environnement minimal avec Python ≥ 3.9 et PyQt5
+│   ├── minimal-qt6.txt       # Fichier 'requirements' pour la création d'un environnement minimal avec Python ≥ 3.10 et PyQt6
 │
 ├── main.py                   # Fichier principal à partir duquel démarrer le programme
 ├── utils.py                  # Fonctions et classes utilitaires communes aux autres parties du programme

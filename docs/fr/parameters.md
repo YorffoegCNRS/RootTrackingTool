@@ -23,8 +23,8 @@
 - **Unité** : `-`
 - **Description** : `Active la fusion temporelle des masks (opération **OR** entre chaque masque et le masque précédent).`
 - **Effet** :
-  - `Activé : permet potentiellement de faire apparaître des racines effacées au jour J qui seraient visibles au jour J-1. Si les masques ne sont pas parfaitement alignés, cette option est dangereuse (dédoublement des racines).`
-  - `Désactivé : pas d'effet`
+  - `Activé → permet potentiellement de faire apparaître des racines effacées au jour J qui seraient visibles au jour J-1. Si les masques ne sont pas parfaitement alignés, cette option est dangereuse (dédoublement des racines).`
+  - `Désactivé → pas d'effet`
 - **Valeur conseillée** : `Désactivée sauf si vous savez vraiment pourquoi vous l'utilisez. Une version moins brutale existe et peut être utilisée en partie II.`
 
 
@@ -106,7 +106,7 @@
   - `Valeur trop faible → l'image sera fortement redimensionnée ce qui entraînera potentiellement une perte de précision`
   - `Valeur trop forte → une image de grande taille risque de ne pas être redimensionnée et entraîner une augmentation significative du temps de calcul` 
 - `Diminue la taille de l'image si besoin pour réduire les temps de calcul. Cela peut également entraîner une perte de précision dans le calcul des métriques (généralement négligeable)`
-- **Valeur conseillée** : `2000 pixels maximum semble être une valeur raisonnable`
+- **Valeur conseillée** : `2000 pixels maximum semble être une valeur raisonnable à affiner en fonction des capacités du PC que vous utilisez.`
 
 ### Maximum pixel before sampling
 - **Variable associée** : `min_sampling_threshold`

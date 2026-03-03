@@ -49,8 +49,8 @@ II. Analyse avancée du réseau racinaire
 
 1. Cliquer sur le bouton ***Crop Roots*** pour cropper les images autour des racines et exporter le résultat.
 2. Cliquer sur le bouton ***Crop Leaves*** pour cropper les images autour des feuilles et exporter le résultat.
-3. Cliquer sur le bouton ***Segment Roots*** pour ouvrir la fenêtre de paramètres de la segmentation puis cliquer sur ***Apply*** lorsque le résultat vous convient.
-4. Cliquer sur le bouton ***Segment Leaves*** pour ouvrir la fenêtre de paramètres de la segmentation puis cliquer sur ***Apply*** lorsque le résultat vous convient.
+3. Cliquer sur le bouton ***Segment Roots*** pour ouvrir la fenêtre de paramètres de la segmentation racinaire puis cliquer sur ***Apply*** lorsque le résultat vous convient.
+4. Cliquer sur le bouton ***Segment Leaves*** pour ouvrir la fenêtre de paramètres de la segmentation foliaire puis cliquer sur ***Apply*** lorsque le résultat vous convient.
 5. Visualisation possible des courbes d'évolution de la taille des feuilles/racines et de leur enveloppe convexe via les onglets ***Roots Graph*** et ***Leaves Graph***.
 
 
