@@ -1,7 +1,7 @@
 # RTT : outputs
 
 * 🇬🇧 English version (default)
-* 🇫🇷 [Version française](docs/fr/outputs.md)
+* 🇫🇷 [Version française](../fr/outputs.md)
 
 
 ## 1. Expected format for image names
@@ -187,4 +187,5 @@ If the scale factor for the number of pixels per centimeter was entered before r
   This method corresponds to a weighted 8-connected metric that provides an accurate approximation of Euclidean length in discrete space.
 
 Both measurements are expressed in pixels.
+
 If the pixels/cm parameter is defined, additional columns suffixed with `_cm` are added, replacing pixels with centimeters and pixels² with cm².
