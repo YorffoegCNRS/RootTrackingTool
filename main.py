@@ -136,6 +136,7 @@ class ProcessingWorker(QThread):
                     if not config.selection_coords and self.parent_app.current_image_array is not None:
                         height, width = self.parent_app.current_image_array.shape[:2]
                         config.selection_coords = QRect(0, 0, width, height)
+                        config.selection_coords_ratio = [0.0, 0.0, 1.0, 1.0]
                     
                     for dataset_name in self.selected_datasets:
                         if self.should_stop:
@@ -154,8 +155,14 @@ class ProcessingWorker(QThread):
                             
                             image_path = os.path.join(dataset_info.path, image_name)
                             image = image_read(image_path)
+                            height, width = image.shape[:2]
                             
-                            rect = config.selection_coords
+                            coords_ratio = config.selection_coords_ratio
+                            rect = QRect(round(coords_ratio[0] * width),
+                                         round(coords_ratio[1] * height),
+                                         round(coords_ratio[2] * width),
+                                         round(coords_ratio[3] * height))
+                            
                             crop_image = image[rect.y():rect.y() + rect.height(),
                                              rect.x():rect.x() + rect.width()]
                             
@@ -483,6 +490,7 @@ class AnalysisConfig:
         self.name = name
         self.enabled = check_state
         self.selection_coords = None
+        self.selection_coords_ratio = None
         self.default_threshold_params = {
                                             'red_range': (0, 255),
                                             'green_range': (0, 255), 
@@ -538,7 +546,9 @@ class ImageDisplayWidget(QLabel):
         self.start_point = None
         self.current_point = None
         self.selection_rect = None
+        self.original_image_shape = None
         self.original_selection_coords = None
+        self.original_selection_coords_ratio = None
         self.default_color = default_color
         self.rgb_paint_color = QColor(self.default_color[0], self.default_color[1], self.default_color[2], 255)
         
@@ -553,6 +563,8 @@ class ImageDisplayWidget(QLabel):
         
     def setImagePixmap(self, pixmap):
         self.original_pixmap = pixmap
+        pixmap_size = pixmap.size()
+        self.original_image_shape = (pixmap_size.height(), pixmap_size.width())
         self.updateDisplayedImage()
     
     def setImageArray(self, image_array):
@@ -561,6 +573,7 @@ class ImageDisplayWidget(QLabel):
             return
         
         self.image_array = image_array.copy()  # Stocker une copie de l'array
+        self.original_image_shape = self.image_array.shape[:2]
         
         # Convertir numpy array vers QPixmap
         height, width = image_array.shape[:2]
@@ -580,6 +593,7 @@ class ImageDisplayWidget(QLabel):
             
         widget_size = self.size()
         pixmap_size = self.original_pixmap.size()
+        self.original_image_shape = (pixmap_size.height(), pixmap_size.width())
         
         scale_x = widget_size.width() / pixmap_size.width()
         scale_y = widget_size.height() / pixmap_size.height()
@@ -703,6 +717,21 @@ class ImageDisplayWidget(QLabel):
             self.selection_rect = None
         self.update()
     
+    def setSelectionCoordsRatio(self, coords_ratio):
+        """Définit les coordonnées de sélection en terme de proportion des dimensions de l'image depuis l'extérieur"""
+        self.original_selection_coords_ratio = coords_ratio
+        
+        if coords_ratio and self.original_image_shape:
+            height, width = self.original_image_shape
+            self.original_selection_coords = QRect(round(coords_ratio[0]*width), 
+                                                   round(coords_ratio[1]*height),
+                                                   round(coords_ratio[2]*width),
+                                                   round(coords_ratio[3]*height))
+            self.selection_rect = self.convertOriginalToDisplayCoords(self.original_selection_coords)
+        else:
+            self.selection_rect = None
+        self.update()
+    
     def clearImage(self):
         """Efface l'image affichée"""
         self.original_pixmap = None
@@ -740,8 +769,9 @@ class App(QWidget):
         self.rgb_color = [56, 166, 239]
         self.current_tab_index = 0
         
-        # Variable pour stocker la sélection temporaire en cours
+        # Variables pour stocker la sélection temporaire en cours
         self.temp_selection_coords = None
+        self.temp_selection_coords_ratio = None
         
         # Configuration des analyses (globale pour tous les datasets)
         self.roots_checkbox_analysis_state = True
@@ -1181,11 +1211,13 @@ class App(QWidget):
     def confirmSelection(self, analysis_type):
         """Confirme et sauvegarde la sélection pour un type d'analyse"""
         # Si aucun sélection, on garde l'entièreté de l'image
-        if self.temp_selection_coords is None:
+        if self.temp_selection_coords_ratio is None:
             nr, nc = self.current_image_array.shape[:2]
             self.temp_selection_coords = QRect(0, 0, nc, nr)
+            self.temp_selection_coords_ratio = [0.0, 0.0, 1.0, 1.0]
         
-        if self.temp_selection_coords is not None:
+        if self.temp_selection_coords_ratio is not None:
+            self.analysis_configs[analysis_type].selection_coords_ratio = self.temp_selection_coords_ratio
             self.analysis_configs[analysis_type].selection_coords = self.temp_selection_coords
             self.current_analysis_type = analysis_type
             # Mettre à jour l'affichage
@@ -1414,9 +1446,9 @@ class App(QWidget):
         
         current_widget = self.tabWidget.currentWidget()
         if index == 1:  # Roots tab
-            current_widget.setSelectionCoords(self.analysis_configs["roots"].selection_coords)
+            current_widget.setSelectionCoordsRatio(self.analysis_configs["roots"].selection_coords_ratio)
         elif index == 2:  # Leaves tab
-            current_widget.setSelectionCoords(self.analysis_configs["leaves"].selection_coords)
+            current_widget.setSelectionCoordsRatio(self.analysis_configs["leaves"].selection_coords_ratio)
         elif index == 3:  # Roots Graph tab
             self.createSpecificGraph("roots")
         elif index == 4:  # Leaves Graph tab
@@ -1426,7 +1458,7 @@ class App(QWidget):
             if not self.activeSelection:
                 current_widget.clearSelection()
             elif self.current_analysis_type in self.analysis_configs:
-                current_widget.setSelectionCoords(self.analysis_configs[self.current_analysis_type].selection_coords)
+                current_widget.setSelectionCoordsRatio(self.analysis_configs[self.current_analysis_type].selection_coords_ratio)
     
     def createSpecificGraph(self, analysis_type):
         """Crée un graphique spécifique avec seaborn pour un rendu moderne"""
@@ -1652,11 +1684,29 @@ class App(QWidget):
                 else:
                     self.leavesTab.clearImage()
     
+    def convertSelectionCoordinatesRatio(self, coords_ratio):
+        if coords_ratio is not None:
+            height, width = self.current_image_array.shape[:2]
+            coords = QRect(round(coords_ratio[0] * width),
+                           round(coords_ratio[1] * height),
+                           round(coords_ratio[2] * width),
+                           round(coords_ratio[3] * height))
+            return(coords)
+    
+    def convertSelectionCoords(self, coords):
+        if coords is not None:
+            height, width = self.current_image_array.shape[:2]
+            coords_ratio = [coords.x() / width, 
+                            coords.y() / height,
+                            coords.width() / width, 
+                            coords.height() / height]
+            return(coords_ratio)
+    
     def updateAllSelections(self):
         """Met à jour les sélections affichées dans tous les onglets"""
-        self.originalTab.setSelectionCoords(self.analysis_configs[self.current_analysis_type].selection_coords)
-        self.rootsTab.setSelectionCoords(self.analysis_configs["roots"].selection_coords)
-        self.leavesTab.setSelectionCoords(self.analysis_configs["leaves"].selection_coords)
+        self.originalTab.setSelectionCoordsRatio(self.analysis_configs[self.current_analysis_type].selection_coords_ratio)
+        self.rootsTab.setSelectionCoordsRatio(self.analysis_configs["roots"].selection_coords_ratio)
+        self.leavesTab.setSelectionCoordsRatio(self.analysis_configs["leaves"].selection_coords_ratio)
         self.updateSelectionInfo()
     
     def openColorDialog(self):
@@ -1684,7 +1734,9 @@ class App(QWidget):
         """Appelée quand une sélection est terminée"""
         # Déterminer dans quel onglet la sélection a été faite
         current_index = self.tabWidget.currentIndex()
+        height, width = self.current_image_array.shape[:2]
         self.temp_selection_coords = original_coords
+        self.temp_selection_coords_ratio = self.convertSelectionCoords(self.temp_selection_coords)
         
         # Activer les boutons de confirmation
         self.confirmRootsSelectionButton.setEnabled(True)
@@ -1695,10 +1747,12 @@ class App(QWidget):
     def updateSelectionInfo(self):
         """Met à jour les informations de sélection affichées"""
         current_index = self.tabWidget.currentIndex()
+        height, width = self.current_image_array.shape[:2]
         
         # Afficher d'abord la sélection temporaire si elle existe
-        if self.temp_selection_coords:
-            coords = self.temp_selection_coords
+        if self.temp_selection_coords_ratio:
+            coords = self.convertSelectionCoordinatesRatio(self.temp_selection_coords_ratio)
+            
             info_prefix = "Temporary Selection:"
             info_text = f"{info_prefix}\nX: {coords.x()}, Y: {coords.y()}\nW: {coords.width()}, H: {coords.height()}\n\nClick 'Confirm' to apply"
         else:
