@@ -3382,7 +3382,7 @@ class RootArchitectureWindow(QMainWindow):
                                                   "CSV Files (*.csv)")
         
         if filename:
-            self.current_df.to_csv(filename, index=False)
+            self.current_df.to_csv(filename, mode='w', index=False)
             self.log(f"💾 Exporté: {filename}")
             QMessageBox.information(self, "Export successful", f"Results saved:\n{filename}")
     
