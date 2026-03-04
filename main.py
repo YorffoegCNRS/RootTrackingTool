@@ -824,12 +824,6 @@ class App(QWidget):
             self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
             self.logo_pixmap = QPixmap(self.logo_file_path)
         
-        self.logo_start_file_name = "logo_start.png"
-        self.logo_start_file_path = os.path.join(self.icons_directory, self.logo_start_file_name)
-        self.logo_start_shape = cv2.imread(self.logo_start_file_path, cv2.IMREAD_UNCHANGED).shape[:2]
-        self.start_icon_qsize = QSize(round(self.logo_start_shape[0] * 200 / self.logo_start_shape[1]), 200)
-        self.logo_start_icon = QIcon(self.logo_start_file_path)
-        
         # Images du dataset courant
         self.image_name_list = []
         self.image_path_list = []
