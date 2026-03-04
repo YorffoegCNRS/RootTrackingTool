@@ -1,7 +1,7 @@
 # RTT : outputs
 
 * 🇬🇧 English version (default)
-* 🇫🇷 [Version française](../fr/outputs.md)
+* 🇫🇷 [Version française](docs/fr/outputs.md)
 
 
 ## 1. Expected format for image names
@@ -22,7 +22,12 @@ DS_01_input_d20.tiff
 
 ## 2. Results of the quick analysis of roots and leaves
 
-The first part of the program, which segments images and prepares masks for advanced root system analysis in the second part, still allows for rapid root and/or leaf analysis. After selecting the files to be processed, the output folder, the areas of interest, and segmenting the roots/leaves, a CSV file will be automatically exported. Let's assume that we are working on a dataset named DS_01, and that the output folder is the default Analysis folder. We will then have the following file tree:
+The first part of the program, which segments images and prepares masks for advanced root system analysis in the second part, still allows for rapid root and/or leaf analysis. After selecting the files to be processed, the output folder, the areas of interest, and segmenting the roots/leaves, a CSV file will be automatically exported for each dataset analyzed. An additional CSV file containing all the results will also be created if multiple datasets are selected for analysis.
+
+
+### 1. Analysis of a single dataset
+
+Let's assume that we are working on a dataset named DS_01, and that the output folder is the default Analysis folder. We will then have the following file tree:
 
 ```text
 RTT\
@@ -63,7 +68,66 @@ RTT\
 
 The **Leaves** and **Roots** folders and their subfolders are automatically created during analysis. During the segmentation of roots and leaves, the CSV files **DS_01_roots_analysis.csv** and **DS_01_leaves_analysis.csv** will be created, containing the results of the rapid analysis of roots and leaves, respectively.
 
-### Variables list
+
+### 2. Analysis of multiple datasets
+
+In this section, we assume that at least two datasets, DS\_01 and DS\_02, have been selected before starting the analysis. In this case, the exported files are organized as follows, with the root analysis results grouped in the file **global_roots_analysis.csv** and the leaf analysis results grouped in the file **global_leaves_analysis**. These two files are located directly at the root of the output folder (here, the **Analysis** folder). Here is the structure showing how the exported files are organized in this configuration:
+
+
+```text
+RTT\
+│
+├── Analysis/
+│   ├── DS_01/
+│   │   ├── Leaves/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   ├── Segmented/
+│   │   │   ├── DS_01_leaves_analysis.csv
+│   │   │
+│   │   ├── Roots/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   ├── Segmented/
+│   │   │   ├── Skeletonized/
+│   │   │   ├── DS_01_roots_analysis.csv
+│   ├── DS_02/
+│   │   ├── Leaves/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   ├── Segmented/
+│   │   │   ├── DS_02_leaves_analysis.csv
+│   │   │
+│   │   ├── Roots/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   ├── Segmented/
+│   │   │   ├── Skeletonized/
+│   │   │   ├── DS_02_roots_analysis.csv
+├── ...
+├── global_roots_analysis.csv
+│
+├── Data/
+│   ├── Dataset1/
+│   │   ├── ...
+│   ├── ...
+├── icons/
+│   ├── IconRTT.png
+│   ├── logo_rtt.png
+│   ├── logo_rtt_2.png
+│
+├── main.py
+├── utils.py
+├── widgets.py
+├── window_analyzer.py
+```
+
+
+### 3. Variables list
 
 * Dataset : dataset name
 * Image name : image name
@@ -80,6 +144,11 @@ Two export modes are available:
 
 - Analysis of a single dataset → manual export
 - Analysis of multiple datasets → automatic export to DS/Roots/Results
+
+
+### 1. Analysis of the current dataset
+
+The arborescence below shows the organization of the files exported during analysis of the current dataset (a single dataset):
 
 
 ```text
@@ -120,15 +189,68 @@ RTT\
 The **DS_01/Roots/Results** folder contains the CSV file **DS_01_root_architecture_results.csv** with the results of the root system analysis, variables displayed in the ***Results*** tab (and ***Heatmap*** for root length per cell), and the ***Visualizations*** containing visualization images of the root graph for each day of the experiment.
 
 
-### Important notes
+### 2. Analysis of selected datasets
 
-- Lengths are calculated on an 8-connected binary skeleton.
-- Angles are expressed in degrees.
-- Metrics suffixed with `_cm` are only present if the pixels/cm parameter is defined.
-- The centroid_*_display variables depend on visual resizing.
+The organization of exported files when analyzing multiple datasets differs from analyzing a single dataset. The exported files are the same as for analyzing a single dataset, but a CSV file containing all the results is also created. Here is how the exported files are organized in this mode:
+
+```text
+RTT\
+│
+├── Analysis/
+│   ├── DS_01/
+│   │   ├── Leaves/
+│   │   │   ├── ...
+│   │   │
+│   │   ├── Roots/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   │   ├── Visualizations/
+│   │   │   │   │   ├── DS_01_root_arch_J006.png
+│   │   │   │   │   ├── DS_01_root_arch_J007.png
+│   │   │   │   │   ├── DS_01_root_arch_J010.png
+│   │   │   │   │   ├── ...
+│   │   │   │   │   ├── DS_01_root_arch_J020.png
+│   │   │   │   ├── DS_01_root_architecture_results.csv
+│   │   │   ├── Segmented/
+│   │   │   ├── Skeletonized/
+│   │   │   ├── DS_01_roots_analysis.csv
+│
+│   ├── DS_02/
+│   │   ├── Leaves/
+│   │   │   ├── ...
+│   │   │
+│   │   ├── Roots/
+│   │   │   ├── ConvexHull/
+│   │   │   ├── Crop/
+│   │   │   ├── Results/
+│   │   │   │   ├── Visualizations/
+│   │   │   │   │   ├── DS_02_root_arch_J005.png
+│   │   │   │   │   ├── DS_02_root_arch_J007.png
+│   │   │   │   │   ├── DS_02_root_arch_J011.png
+│   │   │   │   │   ├── ...
+│   │   │   │   │   ├── DS_02_root_arch_J020.png
+│   │   │   │   ├── DS_02_root_architecture_results.csv
+│   │   │   ├── Segmented/
+│   │   │   ├── Skeletonized/
+│   │   │   ├── DS_02_roots_analysis.csv
+├── ...
+├── batch_root_architecture_results.csv
+├── global_leaves_analysis
+├── global_roots_analysis.csv
+│
+├── Data/
+│   ├── ...
+├── icons/
+│   ├── ...
+├── main.py
+├── utils.py
+├── widgets.py
+├── window_analyzer.py
+```
 
 
-## Exported metrics
+## 4. Exported metrics
 
 The variables are listed in alphabetical order to facilitate quick searching.
 Variables suffixed with `_raw` correspond to values before pruning small branches.
@@ -172,6 +294,15 @@ If the scale factor for the number of pixels per centimeter was entered before r
 * total_area
 * total_root_length
 
+
+### Important notes
+
+- Lengths are calculated on an 8-connected binary skeleton.
+- Angles are expressed in degrees.
+- Metrics suffixed with `_cm` are only present if the pixels/cm parameter is defined.
+- The centroid_*_display variables depend on visual resizing.
+
+
 ### Difference between `total_root_length` and `exact_skeleton_length`
 
 * **total_root_length**  
@@ -187,5 +318,4 @@ If the scale factor for the number of pixels per centimeter was entered before r
   This method corresponds to a weighted 8-connected metric that provides an accurate approximation of Euclidean length in discrete space.
 
 Both measurements are expressed in pixels.
-
 If the pixels/cm parameter is defined, additional columns suffixed with `_cm` are added, replacing pixels with centimeters and pixels² with cm².
