@@ -2751,6 +2751,8 @@ class RootArchitectureWindow(QMainWindow):
             getattr(self, "run_btn", None),
             getattr(self, "batch_btn", None),
             getattr(self, "select_btn", None),
+            getattr(self, "export_csv_btn", None),
+            getattr(self, "export_images_btn", None),
             getattr(self, "dataset_selector", None),
             getattr(self, "dataset_selection_widget", None),
             getattr(self, "only_segmented_check", None)
@@ -2838,6 +2840,8 @@ class RootArchitectureWindow(QMainWindow):
             getattr(self, "run_btn", None),
             getattr(self, "batch_btn", None),
             getattr(self, "select_btn", None),
+            getattr(self, "export_csv_btn", None),
+            getattr(self, "export_images_btn", None),
             getattr(self, "dataset_selector", None),
             getattr(self, "dataset_selection_widget", None),
             getattr(self, "only_segmented_check", None)
