@@ -6,13 +6,13 @@ PYQT_AVAILABLE = False
 PYQT_VERSION = None
 
 try:
-    from PyQt6.QtCore import Qt, QObject
+    from PyQt6.QtCore import Qt, QObject, QEvent
     from PyQt6.QtWidgets import QApplication
     PYQT_AVAILABLE = True
     PYQT_VERSION = 6
 except:
     try:
-        from PyQt5.QtCore import Qt, QObject
+        from PyQt5.QtCore import Qt, QObject, QEvent
         from PyQt5.QtWidgets import QApplication
         PYQT_AVAILABLE = True
         PYQT_VERSION = 5
