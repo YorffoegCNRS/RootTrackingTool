@@ -11,35 +11,7 @@ OPTIMISATIONS PRINCIPALES:
 6. Cache des calculs intermédiaires
 """
 
-PYQT_AVAILABLE = False
-PYQT_VERSION = None
-
-try:
-    from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
-    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                                QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
-                                QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
-                                QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-                                QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
-    from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
-    PYQT_AVAILABLE = True
-    PYQT_VERSION = 6
-except:
-    try:
-        from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                                    QPushButton, QLabel, QProgressBar, QTextEdit, QGridLayout,
-                                    QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy,
-                                    QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-                                    QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox)
-        from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-        from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
-        PYQT_AVAILABLE = True
-        PYQT_VERSION = 5
-    except:
-        print("This script requires PyQt5 or PyQt6 to run. Neither of these versions was found!")
-
-
-import cv2, gc, math, os, re, sys, traceback
+import cv2, gc, math, os, re, sys, time, traceback
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
@@ -61,7 +33,15 @@ from scipy.ndimage import convolve, center_of_mass
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 
+from compat import ( PYQT_AVAILABLE, PYQT_VERSION, QThread, Signal, Qt, QTimer, QObject, QEvent, QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QProgressBar, QTextEdit,
+                    QGridLayout, QGroupBox, QSpinBox, QFileDialog, QSlider, QSizePolicy, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QMessageBox, QCheckBox, QComboBox, QScrollArea, QDoubleSpinBox, 
+                    QPixmap, QImage, QPainter, QPen, QColor, QtCompat, CheckState, FocusPolicy, FrameShape, ScrollBarPolicy, SizePolicy, exec_app )
+
+from core import root_graph_cpp
 from utils import *
+
+
+USE_CPP_GRAPH = True
 
 
 def extract_branches_from_graph(G_local):
@@ -386,49 +366,58 @@ class RootArchitectureAnalyzer:
                 region_contours.append(coords[indices].astype(np.float32))
             
             # Pour chaque région, trouver la plus proche avec KDTree
-            connections = []
-            for i, coords_i in enumerate(region_contours):
-                if len(coords_i) == 0:
-                    continue
+            try:
+                current_mask = root_graph_cpp.connect_regions(
+                    current_mask.astype(np.uint8, copy=False),
+                    [coords.astype(np.float32, copy=False) for coords in region_contours],
+                    int(line_thickness),
+                    float(max_connection_distance)
+                ).astype(bool, copy=False)
+            except Exception as e:
+                self.log(f"CPP connect_regions failed, fallback Python: {e}")
                 
-                min_dist = np.inf
-                best_connection = None
-                
-                for j, coords_j in enumerate(region_contours):
-                    if i >= j or len(coords_j) == 0:
+                # Fallback Python historique
+                connections = []
+                for i, coords_i in enumerate(region_contours):
+                    if len(coords_i) == 0:
                         continue
                     
-                    # KDTree pour recherche rapide du plus proche voisin
-                    tree = cKDTree(coords_j)
-                    distances, indices = tree.query(coords_i, k=1)
-                    min_idx = np.argmin(distances)
+                    min_dist = np.inf
+                    best_connection = None
                     
-                    if distances[min_idx] < min_dist:
-                        min_dist = distances[min_idx]
-                        best_connection = (coords_i[min_idx], coords_j[indices[min_idx]])
+                    for j, coords_j in enumerate(region_contours):
+                        if i >= j or len(coords_j) == 0:
+                            continue
+                        
+                        tree = cKDTree(coords_j)
+                        distances, indices = tree.query(coords_i, k=1)
+                        min_idx = np.argmin(distances)
+                        
+                        if distances[min_idx] < min_dist:
+                            min_dist = distances[min_idx]
+                            best_connection = (coords_i[min_idx], coords_j[indices[min_idx]])
+                        
+                    if (best_connection is not None) and (min_dist <= max_connection_distance):
+                        connections.append(best_connection)
                 
-                if (best_connection is not None) and (min_dist <= max_connection_distance):
-                    connections.append(best_connection)
-            
-            # Dessiner toutes les connexions
-            for point1, point2 in connections:
-                rr, cc = draw.line(
-                    int(point1[0]), int(point1[1]),
-                    int(point2[0]), int(point2[1])
-                )
-                
-                # Épaissir la ligne
-                for r, c in zip(rr, cc):
-                    rr_thick, cc_thick = draw.disk(
-                        (r, c), radius=line_thickness, 
-                        shape=current_mask.shape
+                for point1, point2 in connections:
+                    rr, cc = draw.line(
+                        int(point1[0]), int(point1[1]),
+                        int(point2[0]), int(point2[1])
                     )
-                    current_mask[rr_thick, cc_thick] = True
+                    
+                    for r, c in zip(rr, cc):
+                        rr_thick, cc_thick = draw.disk(
+                            (r, c), radius=line_thickness,
+                            shape=current_mask.shape
+                        )
+                        current_mask[rr_thick, cc_thick] = True
             
+                del connections
             iteration += 1
             
             # Libération mémoire
-            del label_image, regions, region_contours, connections
+            del label_image, regions, region_contours
             gc.collect()
         
         return current_mask
@@ -556,13 +545,7 @@ class RootArchitectureAnalyzer:
                             utilisé pour définir un couloir spatial autour duquel on contraint la racine principale.
         """
         
-        
         # Squelettisation
-        # IMPORTANT:
-        # - skimage.skeletonize() (Zhang-Suen) a un comportement surprenant sur certains objets
-        #   déjà très fins (ex: bande diagonale de 2px), pouvant "s'effondrer" en un seul pixel.
-        # - Dans ces cas, thin() (amincissement) est beaucoup plus stable.
-        # On fait donc un fallback automatique si le squelette est anormalement petit.
         mask_bool = binary_mask.astype(bool)
         skeleton = skeletonize(mask_bool)
         
@@ -573,15 +556,14 @@ class RootArchitectureAnalyzer:
             if msum > 0 and ssum < max(2, int(0.01 * msum)):
                 skeleton = thin(mask_bool)
         except Exception:
-            # En cas de souci d'import/compatibilité, on garde skeletonize()
             pass
+        
         skeleton_points = np.array(np.nonzero(skeleton)).T
         
         if len(skeleton_points) == 0:
             return self._empty_features()
         
-        
-        # Détection des extrémités (optimisée)
+        # Détection des extrémités
         kernel = np.ones((3, 3), dtype=np.uint8)
         neighbor_count = convolve(skeleton.astype(np.uint8), kernel, mode='constant') - skeleton.astype(np.uint8)
         endpoints = (skeleton & (neighbor_count == 1))
@@ -593,14 +575,13 @@ class RootArchitectureAnalyzer:
         # Si trop de points, échantillonner le graphe
         if len(skeleton_points) > self.max_skeleton_size:
             self.log(f"Skeleton thick ({len(skeleton_points)} points), sampling...")
-            # Garder tous les endpoints + échantillonnage du reste
             non_endpoint_mask = skeleton & (~endpoints)
             non_endpoint_points = np.array(np.nonzero(non_endpoint_mask)).T
             
             if len(non_endpoint_points) > 50000:
                 sample_indices = np.random.choice(
-                    len(non_endpoint_points), 
-                    size=5000, 
+                    len(non_endpoint_points),
+                    size=5000,
                     replace=False
                 )
                 sampled_points = non_endpoint_points[sample_indices]
@@ -608,183 +589,236 @@ class RootArchitectureAnalyzer:
             
             self.log(f"Points reduced to {len(skeleton_points)}")
         
-        # Création du graphe (rapide, 8-connectivité en O(N))
-        # L'ancienne version utilisait un KDTree + query_ball_point par nœud, ce qui peut devenir très lent
-        # sur certains masques (ex: probabilités / squelette dense). Ici on construit les arêtes directement
-        # via les 4 voisins "avant" (droite, bas, diag bas-droite, diag bas-gauche) pour éviter les doublons.
-        G = nx.Graph()
-        
-        # Ensemble de points pour membership O(1)
-        pts = [tuple(p) for p in skeleton_points]
-        pts_set = set(pts)
-        
-        # Ajouter les nœuds
-        G.add_nodes_from(pts)
-        
-        # Ajouter les arêtes (8-connectivité, sans doublons)
-        sqrt2 = math.sqrt(2.0)
-        neighbor_steps = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, sqrt2), (1, -1, sqrt2)]
-        for (y, x) in pts:
-            for dy, dx, w in neighbor_steps:
-                nb = (y + dy, x + dx)
-                if nb in pts_set:
-                    G.add_edge((y, x), nb, weight=w)
-        
-        # ---------- Biais vers la racine de référence (dernier jour) ----------
-        node_dist = None
-        if main_ref_path is not None and len(G.nodes) >= 2:
-            ref = np.asarray(main_ref_path, dtype=float)
-            if ref.ndim == 2 and ref.shape[0] >= 2:
-                node_dist = {}
-                for n in G.nodes:
-                    p = np.array(n, dtype=float)
-                    d = self._distance_point_to_path(p, ref)
-                    node_dist[n] = d
-                
-                # échelle de distance pour normaliser (évite des énormes nombres)
-                max_d = max(node_dist.values()) or 1.0
-                alpha = float(self.main_path_bias) * 2.0  # Doublé pour stabilité
-                
-                # poids "biaisé" pour chaque arête
-                for u, v, data in G.edges(data=True):
-                    base_len = data.get(
-                        "weight",
-                        np.linalg.norm(np.array(u, dtype=float) - np.array(v, dtype=float))
-                    )
-                    d = (node_dist[u] + node_dist[v]) / 2.0
-                    penalty = 1.0 + alpha * (d / max_d) ** 2
-                    data["biased_weight"] = base_len * penalty
-            else:
-                node_dist = None
-        
-        # Calcul du chemin principal
+        # ------------------------------------------------------------------
+        # PARTIE GRAPHE : C++ ou fallback NetworkX
+        # ------------------------------------------------------------------
         main_path_length = 0.0
         main_path = []
+        secondary_branches = []
+        secondary_length = 0.0
+        branch_count = 0
         
-        # 1) Essai avec la racine de référence (dernier jour)
-        if (main_ref_points is not None or main_ref_path is not None) and len(G.nodes) >= 2:
-            try:
-                if main_ref_points is not None:
-                    ref_top, ref_bottom = main_ref_points
-                else:
-                    ref_top, ref_bottom = main_ref_path[0], main_ref_path[-1]
-                
-                ref_top = np.asarray(ref_top, dtype=float)
-                ref_bottom = np.asarray(ref_bottom, dtype=float)
-                
-                start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
-                end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
-                
-                if nx.has_path(G, start_node, end_node):
-                    # si on a un biais (main_ref_path), on l'utilise
-                    weight_attr = "biased_weight" if main_ref_path is not None else "weight"
-                    main_path = nx.shortest_path(G,
-                                                 source=start_node,
-                                                 target=end_node,
-                                                 weight=weight_attr)
-                    
-                    # prolonger jusqu’aux vraies extrémités
-                    main_path = self._extend_path_to_endpoints(G, main_path)
-                    
-                    # prolonger le chemin le long de l'axe global (ref_top -> ref_bottom)
-                    #                     main_path = self._extend_path_along_axis(G, main_path, ref_top, ref_bottom)
-                    
-                    main_path_length = sum(
-                        np.linalg.norm(np.array(main_path[i], dtype=float) -
-                                       np.array(main_path[i-1], dtype=float))
-                        for i in range(1, len(main_path))
-                    )
-                    G.remove_nodes_from(main_path)
-            except Exception:
-                main_path = []
-                main_path_length = 0.0
+        use_cpp_here = bool(USE_CPP_GRAPH)
         
-        # 2) Si ça n’a pas marché, on revient au comportement classique :
-        #    extrémités les plus éloignées verticalement, puis fallback "plus long chemin"
-        if main_path_length == 0.0 and len(endpoint_coords) >= 2:
-            # CORRECTION FINALE : TOUJOURS partir du HAUT (Y min) vers le BAS (Y max)
-            # En coordonnées image : Y=0 est EN HAUT, donc min(Y)=sommet, max(Y)=bas
+        # Si on veut absolument conserver le biais main_ref_path,
+        # on peut forcer automatiquement le fallback Python.
+        # Décommente ce bloc si tu préfères la fidélité stricte au comportement historique.
+        #
+        # if main_ref_path is not None or main_ref_points is not None:
+        #     use_cpp_here = False
+        t0 = time.process_time()
+        if use_cpp_here:
             try:
-                ep = np.asarray(endpoint_coords, dtype=float)
-                if ep.ndim == 2 and ep.shape[0] >= 2:
-                    # Trouver le point le plus HAUT (Y minimum)
-                    top_idx = np.argmin(ep[:, 0])
-                    top_point = ep[top_idx]
-                    
-                    # Trouver le point le plus BAS (Y maximum)
-                    bottom_idx = np.argmax(ep[:, 0])
-                    bottom_point = ep[bottom_idx]
-                    
-                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - top_point))
-                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - bottom_point))
-                else:
-                    start_node = end_node = None
-            except Exception:
-                start_node = end_node = None
+                cpp_result = root_graph_cpp.analyze_skeleton_graph(
+                    skeleton_points.astype(np.int32, copy=False),
+                    main_ref_path.astype(np.int32, copy=False) if (
+                        main_ref_path is not None
+                        and isinstance(main_ref_path, np.ndarray)
+                        and main_ref_path.ndim == 2
+                        and len(main_ref_path) >= 2
+                    ) else None,
+                    float(self.main_path_bias)
+                )
+                
+                main_path = np.asarray(cpp_result["main_path"])
+                secondary_branches = [np.asarray(b) for b in cpp_result["secondary_branches"]]
+                main_path_length = float(cpp_result["main_path_length"])
+                secondary_length = float(cpp_result["secondary_length"])
+                branch_count = int(cpp_result["branch_count"])
             
-            # Fallback si pas assez d'endpoints
-            if start_node is None or end_node is None:
+            except Exception as e:
+                self.log(f"CPP graph failed, fallback to NetworkX: {e}")
+                use_cpp_here = False
+        
+        if not use_cpp_here:
+            # Création du graphe NetworkX
+            G = nx.Graph()
+            
+            pts = [tuple(p) for p in skeleton_points]
+            pts_set = set(pts)
+            
+            G.add_nodes_from(pts)
+            
+            sqrt2 = math.sqrt(2.0)
+            neighbor_steps = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, sqrt2), (1, -1, sqrt2)]
+            for (y, x) in pts:
+                for dy, dx, w in neighbor_steps:
+                    nb = (y + dy, x + dx)
+                    if nb in pts_set:
+                        G.add_edge((y, x), nb, weight=w)
+            
+            # ---------- Biais vers la racine de référence (dernier jour) ----------
+            node_dist = None
+            if main_ref_path is not None and len(G.nodes) >= 2:
+                ref = np.asarray(main_ref_path, dtype=float)
+                if ref.ndim == 2 and ref.shape[0] >= 2:
+                    node_dist = {}
+                    for n in G.nodes:
+                        p = np.array(n, dtype=float)
+                        d = self._distance_point_to_path(p, ref)
+                        node_dist[n] = d
+                    
+                    max_d = max(node_dist.values()) or 1.0
+                    alpha = float(self.main_path_bias) * 2.0
+                    
+                    for u, v, data in G.edges(data=True):
+                        base_len = data.get(
+                            "weight",
+                            np.linalg.norm(np.array(u, dtype=float) - np.array(v, dtype=float))
+                        )
+                        d = (node_dist[u] + node_dist[v]) / 2.0
+                        penalty = 1.0 + alpha * (d / max_d) ** 2
+                        data["biased_weight"] = base_len * penalty
+                else:
+                    node_dist = None
+            
+            # Calcul du chemin principal
+            main_path_length = 0.0
+            main_path = []
+            
+            # 1) Essai avec la racine de référence
+            if (main_ref_points is not None or main_ref_path is not None) and len(G.nodes) >= 2:
                 try:
-                    all_nodes = list(G.nodes)
-                    if len(all_nodes) >= 2:
-                        all_nodes_array = np.array(all_nodes, dtype=float)
-                        top_idx = np.argmin(all_nodes_array[:, 0])
-                        bottom_idx = np.argmax(all_nodes_array[:, 0])
-                        start_node = all_nodes[top_idx]
-                        end_node = all_nodes[bottom_idx]
+                    if main_ref_points is not None:
+                        ref_top, ref_bottom = main_ref_points
+                    else:
+                        ref_top, ref_bottom = main_ref_path[0], main_ref_path[-1]
+                    
+                    ref_top = np.asarray(ref_top, dtype=float)
+                    ref_bottom = np.asarray(ref_bottom, dtype=float)
+                    
+                    start_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_top))
+                    end_node = min(G.nodes, key=lambda n: np.linalg.norm(np.array(n, dtype=float) - ref_bottom))
+                    
+                    if nx.has_path(G, start_node, end_node):
+                        weight_attr = "biased_weight" if main_ref_path is not None else "weight"
+                        main_path = nx.shortest_path(
+                            G,
+                            source=start_node,
+                            target=end_node,
+                            weight=weight_attr
+                        )
+                        
+                        main_path = self._extend_path_to_endpoints(G, main_path)
+                        
+                        main_path_length = sum(
+                            np.linalg.norm(np.array(main_path[i], dtype=float) -
+                                           np.array(main_path[i - 1], dtype=float))
+                            for i in range(1, len(main_path))
+                        )
+                        G.remove_nodes_from(main_path)
+                except Exception:
+                    main_path = []
+                    main_path_length = 0.0
+            
+            # 2) Fallback : meilleure composante connexe
+            if main_path_length == 0.0 and len(G.nodes) >= 2:
+                try:
+                    best_path = []
+                    best_length = 0.0
+                    
+                    components = sorted(
+                        nx.connected_components(G),
+                        key=lambda comp: max(n[0] for n in comp) - min(n[0] for n in comp),
+                        reverse=True
+                    )
+                    
+                    for comp_nodes in components:
+                        if len(comp_nodes) < 2:
+                            continue
+                        
+                        G_comp = G.subgraph(comp_nodes)
+                        nodes_arr = np.array(list(comp_nodes), dtype=float)
+                        
+                        ep_comp = [n for n in comp_nodes if G_comp.degree(n) == 1]
+                        if len(ep_comp) >= 2:
+                            ep_arr = np.array(ep_comp, dtype=float)
+                            s = ep_comp[int(np.argmin(ep_arr[:, 0]))]
+                            e = ep_comp[int(np.argmax(ep_arr[:, 0]))]
+                        else:
+                            s = tuple(nodes_arr[int(np.argmin(nodes_arr[:, 0]))].astype(int))
+                            e = tuple(nodes_arr[int(np.argmax(nodes_arr[:, 0]))].astype(int))
+                        
+                        if s == e or not nx.has_path(G_comp, s, e):
+                            continue
+                        
+                        candidate = nx.shortest_path(G_comp, source=s, target=e, weight="weight")
+                        candidate = self._extend_path_to_endpoints(G_comp, candidate)
+                        candidate_length = sum(
+                            np.linalg.norm(np.array(candidate[idx]) - np.array(candidate[idx - 1]))
+                            for idx in range(1, len(candidate))
+                        )
+                        
+                        if candidate_length > best_length:
+                            best_length = candidate_length
+                            best_path = candidate
+                    
+                    if best_path:
+                        main_path = best_path
+                        main_path_length = best_length
+                        G.remove_nodes_from(main_path)
+                
                 except Exception:
                     pass
             
-            if start_node is not None and end_node is not None and nx.has_path(G, start_node, end_node):
-                main_path = nx.shortest_path(G, source=start_node, target=end_node, weight="weight")
-                # prolonger jusqu’aux vraies extrémités
-                main_path = self._extend_path_to_endpoints(G, main_path)
-                main_path_length = sum(
-                    np.linalg.norm(np.array(main_path[i]) - np.array(main_path[i-1]))
-                    for i in range(1, len(main_path))
+            # Extraire les branches sur le graphe restant
+            secondary_branches = extract_branches_from_graph(G)
+            
+            # Longueur totale des branches secondaires
+            secondary_length = 0.0
+            for branch in secondary_branches:
+                if len(branch) < 2:
+                    continue
+                secondary_length += sum(
+                    np.linalg.norm(np.array(branch[i]) - np.array(branch[i - 1]))
+                    for i in range(1, len(branch))
                 )
-                G.remove_nodes_from(main_path)
+            
+            branch_count = len(secondary_branches)
+            
+            # Libération mémoire
+            del G
         
+        # Harmonisation du format main_path
+        if isinstance(main_path, list):
+            main_path = np.array(main_path) if main_path else np.array([])
+        else:
+            main_path = np.asarray(main_path)
         
         # ============================
-        # Comptage des terminaisons après élagage des petites terminaisons
-        # (protection de main_path pour ne pas élagaguer la racine principale)
+        # Comptage des terminaisons après élagage
         # ============================
-        
         endpoint_count_pruned = endpoint_count_raw
         root_count_pruned = root_count_raw
-        endpoint_coords_pruned = endpoint_coords  # fallback
+        endpoint_coords_pruned = endpoint_coords
         
         if isinstance(skeleton, np.ndarray) and skeleton.size > 0 and (main_path is not None) and (len(main_path) >= 2):
             protect_mask = np.zeros_like(skeleton, dtype=bool)
             for (yy, xx) in main_path:
-                yy = int(yy); xx = int(xx)
+                yy = int(yy)
+                xx = int(xx)
                 if 0 <= yy < protect_mask.shape[0] and 0 <= xx < protect_mask.shape[1]:
                     protect_mask[yy, xx] = True
             
-            # seuil en pixels de la résolution actuelle (comme pour tes branches)
             prune_len_px = max(1, int(round(self.min_branch_length * self.scale_factor)))
             
-            skeleton_pruned = prune_terminal_spurs(
-                skeleton,
-                min_len_px=prune_len_px,
-                protect_mask=protect_mask,
-                max_iter=50
-            )
-            
-            # recompute endpoints on pruned skeleton
-            neighbor_count_p = convolve(skeleton_pruned.astype(np.uint8), kernel, mode='constant') - skeleton_pruned.astype(np.uint8)
-            endpoints_p = (skeleton_pruned & (neighbor_count_p == 1))
-            endpoint_coords_pruned = np.array(np.nonzero(endpoints_p)).T
-            
-            endpoint_count_pruned = int(len(endpoint_coords_pruned))
-            root_count_pruned = max(0, endpoint_count_pruned - 1)
+            try:
+                skeleton_pruned = root_graph_cpp.prune_terminal_spurs(
+                    skeleton.astype(np.uint8, copy=False),
+                    int(prune_len_px),
+                    protect_mask.astype(np.uint8, copy=False),
+                    50
+                ).astype(bool, copy=False)
+            except Exception as e:
+                self.log(f"CPP prune_terminal_spurs failed, fallback Python: {e}")
+                skeleton_pruned = prune_terminal_spurs(
+                    skeleton,
+                    min_len_px=prune_len_px,
+                    protect_mask=protect_mask,
+                    max_iter=50
+                )
         else:
-            skeleton_pruned = skeleton  # pour éviter NameError si tu veux l'afficher/debug
-        
-        
-        # Extraire les branches sur le graphe restant (sans la racine principale)
-        secondary_branches = extract_branches_from_graph(G)
+            skeleton_pruned = skeleton
         
         # --- FILTRAGE DES PETITES BRANCHES ---
         def _branch_length_px(br):
@@ -797,29 +831,14 @@ class RootArchitectureAnalyzer:
             return float(seg_lengths.sum())
         
         if self.min_branch_length > 0:
-            # self.min_branch_length est exprimé en "pixels de l'image d'origine".
-            # Comme on a éventuellement redimensionné l'image avec self.scale_factor,
-            # on corrige le seuil pour la résolution actuelle :
             length_threshold_resized = self.min_branch_length * self.scale_factor
             filtered_branches = []
             for br in secondary_branches:
                 if _branch_length_px(br) >= length_threshold_resized:
-                    filtered_branches.append(br)
+                    filtered_branches.append(np.asarray(br))
             secondary_branches = filtered_branches
-        # --- FIN FILTRAGE ---
         
-        # Calcul des angles des racines secondaires
-        abs_secondary_angles, secondary_angles = compute_secondary_angles(main_path, secondary_branches)
-        mean_angles, std_angles = np.nan, np.nan
-        mean_abs_angles, std_abs_angles = np.nan, np.nan
-        if len(secondary_angles) > 0:
-            mean_angles = np.mean(secondary_angles)
-            std_angles = np.std(secondary_angles)
-        if len(abs_secondary_angles) > 0:
-            mean_abs_angles = np.mean(abs_secondary_angles)
-            std_abs_angles = np.std(abs_secondary_angles)
-        
-        # Longueur totale des branches secondaires
+        # Recalcul propre après filtrage
         secondary_length = 0.0
         for branch in secondary_branches:
             if len(branch) < 2:
@@ -828,54 +847,84 @@ class RootArchitectureAnalyzer:
                 np.linalg.norm(np.array(branch[i]) - np.array(branch[i - 1]))
                 for i in range(1, len(branch))
             )
-        
         branch_count = len(secondary_branches)
         
+        # Calcul des angles
+        try:
+            abs_secondary_angles, secondary_angles = root_graph_cpp.compute_secondary_angles(
+                np.asarray(main_path, dtype=np.int32),
+                [np.asarray(br, dtype=np.int32) for br in secondary_branches]
+            )
+            abs_secondary_angles = np.asarray(abs_secondary_angles, dtype=float)
+            secondary_angles = np.asarray(secondary_angles, dtype=float)
+        except Exception as e:
+            self.log(f"CPP compute_secondary_angles failed, fallback Python: {e}")
+            abs_secondary_angles, secondary_angles = compute_secondary_angles(main_path, secondary_branches)
+            abs_secondary_angles = np.asarray(abs_secondary_angles, dtype=float)
+            secondary_angles = np.asarray(secondary_angles, dtype=float)
+        
+        mean_angles, std_angles = np.nan, np.nan
+        mean_abs_angles, std_abs_angles = np.nan, np.nan
+        
+        if len(secondary_angles) > 0:
+            mean_angles = np.mean(secondary_angles)
+            std_angles = np.std(secondary_angles)
+        if len(abs_secondary_angles) > 0:
+            mean_abs_angles = np.mean(abs_secondary_angles)
+            std_abs_angles = np.std(abs_secondary_angles)
+        
         # Root count attach
-        attach_positions = []
-        
-        if main_path is not None and len(main_path) > 1:
-            main_arr = np.asarray(main_path, dtype=float)
+        try:
+            cpp_attach = root_graph_cpp.compute_root_count_attach(
+                np.asarray(main_path, dtype=np.int32),
+                [np.asarray(br, dtype=np.int32) for br in secondary_branches],
+                10.0,
+                0.02
+            )
+            root_count_attach = int(cpp_attach["root_count_attach"])
+            attach_positions = np.asarray(cpp_attach["attach_positions"], dtype=float)
+        except Exception as e:
+            self.log(f"CPP compute_root_count_attach failed, fallback Python: {e}")
             
-            # longueur cumulée le long du tronc
-            diffs = np.diff(main_arr, axis=0)
-            seg_len = np.linalg.norm(diffs, axis=1)
-            cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
-            total_len = cumlen[-1] if len(cumlen) > 0 else 1.0
+            attach_positions = []
             
-            max_attach_dist = 10.0  # distance max en pixels entre branche et tronc
-            
-            for br in secondary_branches:  # ou secondary_level1
-                br_arr = np.asarray(br, dtype=float)
-                # distance de chaque point de la branche au tronc
-                # (si trop lourd, tu peux échantillonner quelques points)
-                dists = np.linalg.norm(
-                    br_arr[:, None, :] - main_arr[None, :, :],
-                    axis=2
-                )
-                flat_idx = np.argmin(dists)  # index aplati sur (n_branch_pts * n_main_pts)
-                i_br, i_main = np.unravel_index(flat_idx, dists.shape)  # (idx point branche, idx point tronc)
-                min_dist = dists[i_br, i_main]
+            if main_path is not None and len(main_path) > 1:
+                main_arr = np.asarray(main_path, dtype=float)
                 
-                if min_dist > max_attach_dist:
-                    continue
+                diffs = np.diff(main_arr, axis=0)
+                seg_len = np.linalg.norm(diffs, axis=1)
+                cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+                total_len = cumlen[-1] if len(cumlen) > 0 else 1.0
                 
-                # position le long du tronc normalisée [0,1] -> on indexe cumlen avec i_main (pas flat_idx)
-                attach_pos = cumlen[i_main] / max(total_len, 1e-6)
-                attach_positions.append(attach_pos)
-        
-        # regrouper les positions proches
-        attach_positions = np.array(sorted(attach_positions))
-        cluster_eps = 0.02  # 2% de la longueur du tronc, par ex.
-        
-        root_count_attach = 0
-        if len(attach_positions) > 0:
-            root_count_attach = 1  # la racine principale
-            current_start = attach_positions[0]
-            for p in attach_positions[1:]:
-                if p - current_start > cluster_eps:
-                    root_count_attach += 1
-                    current_start = p
+                max_attach_dist = 10.0
+                
+                for br in secondary_branches:
+                    br_arr = np.asarray(br, dtype=float)
+                    dists = np.linalg.norm(
+                        br_arr[:, None, :] - main_arr[None, :, :],
+                        axis=2
+                    )
+                    flat_idx = np.argmin(dists)
+                    i_br, i_main = np.unravel_index(flat_idx, dists.shape)
+                    min_dist = dists[i_br, i_main]
+                    
+                    if min_dist > max_attach_dist:
+                        continue
+                    
+                    attach_pos = cumlen[i_main] / max(total_len, 1e-6)
+                    attach_positions.append(attach_pos)
+            
+            attach_positions = np.array(sorted(attach_positions))
+            cluster_eps = 0.02
+            
+            root_count_attach = 0
+            if len(attach_positions) > 0:
+                root_count_attach = 1
+                current_start = attach_positions[0]
+                for p in attach_positions[1:]:
+                    if p - current_start > cluster_eps:
+                        root_count_attach += 1
+                        current_start = p
         
         # Autres caractéristiques
         convex_hull = convex_hull_image(binary_mask)
@@ -886,18 +935,61 @@ class RootArchitectureAnalyzer:
         else:
             centroid_x, centroid_y = 0, 0
         
-        # Ajuster les mesures selon le facteur d'échelle
         scale = 1.0 / self.scale_factor if self.scale_factor > 0 else 1.0
         
-        # Longueur par cellule de grille
         grid_lengths_cm = None
-        grid_lengths = self._grid_edge_lengths_from_skeleton(skeleton.astype(bool), self.grid_rows, self.grid_cols)
+        
+        try:
+            cpp_pix = root_graph_cpp.analyze_skeleton_pixels(
+                skeleton_pruned.astype(np.uint8, copy=False),
+                int(self.grid_rows),
+                int(self.grid_cols)
+            )
+            
+            exact_skeleton_length = float(cpp_pix["exact_skeleton_length"]) * scale
+            
+            grid_lengths = cpp_pix["grid_lengths"]
+            if grid_lengths is not None:
+                grid_lengths = np.asarray(grid_lengths, dtype=np.float64) * scale
+            else:
+                grid_lengths = None
+            
+            endpoint_coords_pruned = np.asarray(cpp_pix["endpoint_coords"], dtype=np.int32)
+            endpoint_count_pruned = int(cpp_pix["endpoint_count"])
+            root_count_pruned = max(0, endpoint_count_pruned - 1)
+            
+            centroid_x = float(cpp_pix["centroid_x"])
+            centroid_y = float(cpp_pix["centroid_y"])
+        except Exception as e:
+            self.log(f"CPP analyze_skeleton_pixels failed, fallback Python: {e}")
+            
+            neighbor_count_p = convolve(skeleton_pruned.astype(np.uint8), kernel, mode='constant') - skeleton_pruned.astype(np.uint8)
+            endpoints_p = (skeleton_pruned & (neighbor_count_p == 1))
+            endpoint_coords_pruned = np.array(np.nonzero(endpoints_p)).T
+            
+            endpoint_count_pruned = int(len(endpoint_coords_pruned))
+            root_count_pruned = max(0, endpoint_count_pruned - 1)
+            
+            grid_lengths = self._grid_edge_lengths_from_skeleton(
+                skeleton_pruned.astype(bool),
+                self.grid_rows,
+                self.grid_cols
+            )
+            if grid_lengths is not None:
+                grid_lengths = grid_lengths * scale
+            
+            exact_skeleton_length = self._compute_exact_skeleton_length(
+                skeleton_pruned.astype(bool)
+            ) * scale
+            
+            if np.sum(skeleton_pruned) > 0:
+                centroid_y, centroid_x = center_of_mass(skeleton_pruned)
+            else:
+                centroid_x, centroid_y = 0, 0
+        
         if grid_lengths is not None:
-            grid_lengths = grid_lengths * scale  # same scaling as lengths
             if self.convert_to_cm and self.pixels_per_cm and self.pixels_per_cm > 0:
                 grid_lengths_cm = grid_lengths / float(self.pixels_per_cm)
-        
-        exact_skeleton_length = self._compute_exact_skeleton_length(skeleton_pruned.astype(bool)) * scale
         
         result = {
             'main_root_length': main_path_length * scale,
@@ -917,7 +1009,7 @@ class RootArchitectureAnalyzer:
             'centroid_x_display': centroid_x,
             'centroid_y_display': centroid_y,
             'skeleton': skeleton,
-            'main_path': np.array(main_path) if main_path else np.array([]),
+            'main_path': main_path if len(main_path) > 0 else np.array([]),
             'endpoints': endpoint_coords,
             'convex_hull': convex_hull,
             'secondary_branches': np.array(secondary_branches, dtype=object),
@@ -927,7 +1019,7 @@ class RootArchitectureAnalyzer:
             'abs_secondary_angles': np.array([abs_secondary_angles], dtype=float),
             'mean_abs_secondary_angles': mean_abs_angles,
             'std_abs_secondary_angles': std_abs_angles,
-            'scale':scale,
+            'scale': scale,
             'grid_rows': self.grid_rows,
             'grid_cols': self.grid_cols,
             'grid_lengths': grid_lengths,
@@ -939,6 +1031,9 @@ class RootArchitectureAnalyzer:
             'skeleton_pruned': skeleton_pruned
         }
         
+        t1 = time.process_time()
+        print(f"{t1 - t0} seconds")
+        
         if self.convert_to_cm:
             result['pixels_per_cm'] = self.pixels_per_cm
             result['main_root_length_cm'] = result['main_root_length'] / self.pixels_per_cm
@@ -949,85 +1044,91 @@ class RootArchitectureAnalyzer:
             result['convex_hull_cm'] = result['convex_hull'] / (self.pixels_per_cm ** 2)
             result['convex_area_cm'] = result['convex_area'] / (self.pixels_per_cm ** 2)
         
-        # Libération mémoire
-        del skeleton_points, G
+        del skeleton_points
         gc.collect()
         
         return result
     
     def _extend_path_to_endpoints(self, G, path):
         """
-        Prolonge un chemin existant jusqu'aux vraies extrémités.
+        Prolonge un chemin existant jusqu'aux vraies extrémités globales.
         
-        Au lieu de s'arrêter au premier nœud de degré > 2, on choisit
-        à chaque bifurcation le voisin dont la direction est la plus
-        alignée avec la direction actuelle du chemin (prolongation
-        naturelle de la racine principale).
+        Stratégie : depuis chaque extrémité du chemin, effectue un parcours
+        en avant uniquement (BFS unidirectionnel sans revenir en arrière)
+        pour atteindre l'endpoint le plus extrême, en évitant de croiser
+        des nœuds déjà dans le chemin principal.
         """
         if not path or len(path) < 2:
             return path
         
-        path_deque = deque(path)
-        
-        def extend_side(get_curr, get_prev, append_func, prefer_direction='auto'):
-            curr = np.array(get_curr(), dtype=float)
-            prev = np.array(get_prev(), dtype=float)
+        def find_extreme_endpoint_forward(G, anchor, forbidden, extreme='max_y'):
+            """
+            BFS depuis anchor, sans jamais passer par les nœuds forbidden.
+            Retourne le chemin (liste) vers l'endpoint le plus extrême trouvé.
+            """
+            # BFS pour explorer tous les nœuds accessibles sans revenir
+            visited = {anchor}
+            # parent dict pour reconstruire le chemin
+            parent = {anchor: None}
+            queue = deque([anchor])
             
-            while True:
-                # voisins en excluant le nœud précédent
-                neighbors = [n for n in G.neighbors(tuple(curr)) if tuple(n) != tuple(prev)]
-                if not neighbors:
-                    break  # extrémité atteinte
-                
-                # CORRECTION : Choisir selon la stratégie
-                if prefer_direction == 'down':
-                    # Toujours le voisin le plus BAS (Y maximum = bas de l'image)
-                    best_n = max(neighbors, key=lambda n: n[0])
-                elif prefer_direction == 'up':
-                    # Toujours le voisin le plus HAUT (Y minimum = haut de l'image)
-                    best_n = min(neighbors, key=lambda n: n[0])
-                else:
-                    # Auto: alignement directionnel (comportement original)
-                    v_ref = curr - prev
-                    if np.allclose(v_ref, 0):
-                        break
-                    v_ref = v_ref / np.linalg.norm(v_ref)
-                    
-                    best_n = None
-                    best_dp = -1.0
-                    for n in neighbors:
-                        v = np.array(n, dtype=float) - curr
-                        if np.allclose(v, 0):
-                            continue
-                        v = v / np.linalg.norm(v)
-                        dp = float(np.dot(v_ref, v))
-                        if dp > best_dp:
-                            best_dp = dp
-                            best_n = n
-                    
-                    if best_n is None:
-                        break
-                
-                append_func(tuple(best_n))
-                prev, curr = curr, np.array(best_n, dtype=float)
+            while queue:
+                curr = queue.popleft()
+                for nb in G.neighbors(curr):
+                    if nb not in visited and nb not in forbidden:
+                        visited.add(nb)
+                        parent[nb] = curr
+                        queue.append(nb)
+            
+            # Parmi tous les nœuds visités, trouver les endpoints (degré 1 dans G)
+            endpoints_reached = [n for n in visited if G.degree(n) == 1 and n != anchor]
+            
+            if not endpoints_reached:
+                # Pas d'endpoint : prendre le nœud le plus extrême parmi les visités
+                candidates = list(visited - {anchor})
+                if not candidates:
+                    return []
+                endpoints_reached = candidates
+            
+            # Choisir l'endpoint le plus extrême
+            if extreme == 'min_y':
+                target = min(endpoints_reached, key=lambda n: n[0])
+            else:
+                target = max(endpoints_reached, key=lambda n: n[0])
+            
+            # Reconstruire le chemin depuis anchor vers target via parent
+            path_ext = []
+            curr = target
+            while curr is not None:
+                path_ext.append(curr)
+                curr = parent[curr]
+            path_ext.reverse()  # anchor → target
+            
+            return path_ext  # commence par anchor
         
-        # prolonger vers le "haut" du chemin - TOUJOURS monter (Y min)
-        extend_side(
-            get_curr=lambda: path_deque[0],
-            get_prev=lambda: path_deque[1],
-            append_func=path_deque.appendleft,
-            prefer_direction='up'  # Force à monter jusqu'en haut
-        )
+        path_list = list(path)
+        path_set = set(tuple(n) for n in path_list)
         
-        # prolonger vers le "bas" du chemin - TOUJOURS descendre (Y max)
-        extend_side(
-            get_curr=lambda: path_deque[-1],
-            get_prev=lambda: path_deque[-2],
-            append_func=path_deque.append,
-            prefer_direction='down'  # Force à descendre jusqu'en bas
-        )
+        # --- Prolonger vers le HAUT (endpoint avec Y minimum) ---
+        top_anchor = tuple(path_list[0])
+        # Forbidden = tout le chemin sauf l'ancre elle-même
+        forbidden_top = path_set - {top_anchor}
+        ext_top = find_extreme_endpoint_forward(G, top_anchor, forbidden_top, extreme='min_y')
+        if len(ext_top) > 1:
+            # ext_top[0] == top_anchor, on l'exclut pour éviter le doublon
+            path_list = list(reversed(ext_top[1:])) + path_list
         
-        return list(path_deque)
+        # Recalculer path_set après extension haute
+        path_set = set(tuple(n) for n in path_list)
+        
+        # --- Prolonger vers le BAS (endpoint avec Y maximum) ---
+        bottom_anchor = tuple(path_list[-1])
+        forbidden_bot = path_set - {bottom_anchor}
+        ext_bot = find_extreme_endpoint_forward(G, bottom_anchor, forbidden_bot, extreme='max_y')
+        if len(ext_bot) > 1:
+            path_list = path_list + list(ext_bot[1:])
+        
+        return path_list
     
     def _extend_path_along_axis(self, G, path, top, bottom):
         """
@@ -1147,10 +1248,10 @@ class RootArchitectureAnalyzer:
 class RootArchitectureWorker(QThread):
     """Worker optimisé pour l'analyse"""
     
-    progress = pyqtSignal(int, str)
-    day_analyzed = pyqtSignal(int, dict, np.ndarray, np.ndarray)
-    finished = pyqtSignal(pd.DataFrame)
-    error = pyqtSignal(str)
+    progress = Signal(int, str)
+    day_analyzed = Signal(int, dict, np.ndarray, np.ndarray)
+    finished = Signal(pd.DataFrame)
+    error = Signal(str)
     
     def __init__(self, mask_files, params):
         super().__init__()
@@ -1826,6 +1927,7 @@ class RootHeatmapWidget(QWidget):
         self.figure.tight_layout()
         self.canvas.draw()
 
+
 class RootArchitectureWindow(QMainWindow):
     """Fenêtre optimisée avec paramètres de performance"""
     
@@ -1839,7 +1941,8 @@ class RootArchitectureWindow(QMainWindow):
         self.default_params  =  { 'closing_radius': 5,
                                   'closing_shape': cv2.MORPH_RECT,
                                   'min_branch_length': 20.0,
-                                  'min_object_size': 500,
+                                  'min_connected_components_area': 0,
+                                  'min_object_size': 200,
                                   'max_connection_dst': 240,
                                   'line_thickness': 5,
                                   'temporal_merge': True,
@@ -1953,7 +2056,7 @@ class RootArchitectureWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
         
-        splitter = QSplitter(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        splitter = QSplitter(QtCompat.Horizontal)
         
         # === PANNEAU GAUCHE ===
         left_panel = QWidget()
@@ -2072,8 +2175,8 @@ class RootArchitectureWindow(QMainWindow):
         min_object_size_layout = QHBoxLayout()
         min_object_size_layout.addWidget(QLabel("Minimum object size:"))
         self.min_object_size_spin = QSpinBox()
-        self.min_object_size_spin.setRange(10, 100000)
-        self.min_object_size_spin.setValue(800)
+        self.min_object_size_spin.setRange(0, 100000)
+        self.min_object_size_spin.setValue(200)
         min_object_size_layout.addWidget(self.min_object_size_spin)
         params_layout.addLayout(min_object_size_layout)
         
@@ -2152,7 +2255,7 @@ class RootArchitectureWindow(QMainWindow):
         exec_group = QGroupBox("Execute")
         exec_layout = QVBoxLayout()
         
-        self.run_btn = QPushButton("🚀 Start analysis")
+        self.run_btn = QPushButton("Analyze current dataset")
         self.run_btn.clicked.connect(self.run_analysis)
         self.run_btn.setEnabled(False)
         self.run_btn.setStyleSheet("""
@@ -2169,7 +2272,7 @@ class RootArchitectureWindow(QMainWindow):
         """)
         exec_layout.addWidget(self.run_btn)
         
-        self.batch_btn = QPushButton("Process all datasets")
+        self.batch_btn = QPushButton("Analyze selected datasets")
         self.batch_btn.clicked.connect(self.batch_process_all_datasets)
         self.batch_btn.setStyleSheet("""
             QPushButton { 
@@ -2246,15 +2349,27 @@ class RootArchitectureWindow(QMainWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         try:
-            left_scroll.setFrameShape(QScrollArea.Shape.NoFrame if PYQT_VERSION == 6 else QScrollArea.NoFrame)
+            left_scroll.setFrameShape(FrameShape.NoFrame)
         except Exception:
             pass
         left_scroll.setWidget(left_panel)
         
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = FocusPolicy.StrongFocus
+        for w in left_panel.findChildren((QSpinBox, QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
+        
         # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
         try:
             left_scroll.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VERSION == 6 else Qt.ScrollBarAlwaysOff
+                ScrollBarPolicy.ScrollBarAlwaysOff
             )
         except Exception:
             pass
@@ -2273,7 +2388,7 @@ class RootArchitectureWindow(QMainWindow):
         day_control.setSpacing(6)
         day_control.addWidget(QLabel("Day:"))
         
-        self.day_slider = QSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        self.day_slider = QSlider(QtCompat.Horizontal)
         self.day_slider.setMinimum(0)
         self.day_slider.setMaximum(0)
         self.day_slider.setFixedHeight(18)
@@ -2289,7 +2404,7 @@ class RootArchitectureWindow(QMainWindow):
         day_container.setFixedHeight(26)
         
         size_policy = day_container.sizePolicy()
-        size_policy.setVerticalPolicy(QSizePolicy.Policy.Fixed if PYQT_VERSION == 6 else QSizePolicy.Fixed)
+        size_policy.setVerticalPolicy(SizePolicy.Fixed)
         day_container.setSizePolicy(size_policy)
         
         viz_layout.addWidget(day_container)
@@ -2313,14 +2428,12 @@ class RootArchitectureWindow(QMainWindow):
         plot_control.addWidget(QLabel("Variable:"))
         self.plot_combo = QComboBox()
         self.plot_combo.addItems([
-            'main_root_length', 'main_root_length_cm', 'secondary_roots_length', 
-            'secondary_roots_length_cm', 'total_root_length', 'total_root_length_cm'
-            'secondary_roots_length', 'exact_skeleton_length', 'exact_skeleton_length_cm'
-            'branch_count', 'endpoint_count_raw', 'root_count_raw', 'endpoint_count', 'root_count',
+            'main_root_length', 'secondary_roots_length', 'total_root_length',
+            'secondary_roots_length', 'exact_skeleton_length', 'branch_count',
+            'endpoint_count_raw', 'root_count_raw', 'endpoint_count', 'root_count',
             'root_count_attach', 'root_count_raw_cum', 'root_count_cum', 'root_count_attach_cum', 
-            'total_area', 'convex_hull', 'convex_hull_cm', 'convex_area', 'convex_area_cm', 
-            'total_area', 'mean_secondary_angles', 'mean_abs_secondary_angles', 
-            'std_secondary_angles', 'std_abs_secondary_angles'
+            'total_area', 'convex_hull', 'convex_area', 'mean_secondary_angles', 
+            'mean_abs_secondary_angles', 'std_secondary_angles', 'std_abs_secondary_angles'
         ])
         self.plot_combo.currentTextChanged.connect(self.update_plot)
         plot_control.addWidget(self.plot_combo)
@@ -2343,7 +2456,7 @@ class RootArchitectureWindow(QMainWindow):
         heatmap_day_control.setContentsMargins(0, 0, 0, 0)
         heatmap_day_control.setSpacing(8)
         heatmap_day_control.addWidget(QLabel("Day:"))
-        self.heatmap_day_slider = QSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        self.heatmap_day_slider = QSlider(QtCompat.Horizontal)
         self.heatmap_day_slider.setMinimum(0)
         self.heatmap_day_slider.setMaximum(0)
         # prevent vertical growth
@@ -2445,7 +2558,7 @@ class RootArchitectureWindow(QMainWindow):
             self.change_dataset_files(current_view)
     
     def _on_only_segmented_toggled(self, state):
-        self._show_only_segmented = (state == (Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked))
+        self._show_only_segmented = (state == CheckState.Checked)
         self.refresh_dataset_selector(keep_view=True)
     
     def _on_dataset_view_requested(self, dataset_name):
@@ -3352,11 +3465,10 @@ class RootArchitectureWindow(QMainWindow):
             return
         
         default_path = os.path.join(self.output_directory, self.current_dataset + "-root_architecture_results.csv")
-        filename, _ = QFileDialog.getSaveFileName(self, "Save results", default_path,
-                                                  "CSV Files (*.csv)")
+        filename, _ = QFileDialog.getSaveFileName(self, "Save results", default_path, "CSV Files (*.csv)")
         
         if filename:
-            self.current_df.to_csv(filename, index=False)
+            self.current_df.to_csv(filename, mode='w', index=False)
             self.log(f"💾 Exporté: {filename}")
             QMessageBox.information(self, "Export successful", f"Results saved:\n{filename}")
     
@@ -3565,6 +3677,9 @@ class RootArchitectureWindow(QMainWindow):
             print(message)
     
 
+__all__ = ["extract_branches_from_graph", "compute_secondary_angles", "prune_terminal_spurs",
+            "RootArchitectureAnalyzer", "RootArchitectureWorker", "RootArchitectureWindow",
+            "RootVisualizationWidget", "RootHeatmapWidget"]
 
 
 if __name__ == "__main__":
@@ -3574,14 +3689,4 @@ if __name__ == "__main__":
     window = RootArchitectureWindow()
     window.show()
     
-    if PYQT_VERSION == 6:
-        sys.exit(app.exec())
-    else:
-        sys.exit(app.exec_())
-        # Grille (pour longueurs par section)
-        try:
-            params["grid_rows"] = int(self.viz_widget.n_rows_grid_combo.currentText())
-            params["grid_cols"] = int(self.viz_widget.n_cols_grid_combo.currentText())
-        except Exception:
-            params["grid_rows"] = None
-            params["grid_cols"] = None
+    sys.exit(exec_app(app))

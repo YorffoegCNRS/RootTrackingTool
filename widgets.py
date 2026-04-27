@@ -1,32 +1,19 @@
 import cv2, os, sys
 import numpy as np
+import numpy.linalg as lg
 
 from skimage.morphology import remove_small_objects
 
-PYQT_AVAILABLE = False
-PYQT_VERSION = None
-
-try:
-    from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-    from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem
-    from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
-    PYQT_AVAILABLE = True
-    PYQT_VERSION = 6
-except:
-    try:
-        from PyQt5.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-        from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget, QListWidgetItem
-        from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator
-        PYQT_AVAILABLE = True
-        PYQT_VERSION = 5
-    except:
-        print("This script requires PyQt5 or PyQt6 to run. Neither of these versions was found!")
+from compat import ( PYQT_AVAILABLE, PYQT_VERSION, Qt, QPoint, QRect, QSize, Signal, QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout, QComboBox, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QSizePolicy, QListWidget,
+                    QListWidgetItem, QDoubleSpinBox, QScrollArea, QColor, QFont, QIcon, QPixmap, QImage, QPainter, QIntValidator, QtCompat, CheckState, FocusPolicy, FontWeight, FrameShape, GlobalColor, ImageFormat, ItemFlag, MouseButton,
+                    ScrollBarPolicy, SizePolicy, exec_app )
 
 
+from utils import *
 
 class RangeSlider(QSlider):
     """Range slider personnalisé"""
-    sliderMoved = pyqtSignal(int, int)
+    sliderMoved = Signal(int, int)
     
     def __init__(self, *args):
         super(RangeSlider, self).__init__(*args)
@@ -39,14 +26,14 @@ class RangeSlider(QSlider):
     
     def low(self):
         return self._low
-
+    
     def setLow(self, low: int):
         self._low = low
         self.update()
-
+    
     def high(self):
         return self._high
-
+    
     def setHigh(self, high: int):
         self._high = high
         self.update()
@@ -56,7 +43,7 @@ class RangeSlider(QSlider):
         painter = QPainter(self)
         
         # Dessiner la barre de base
-        painter.fillRect(self.rect(), Qt.GlobalColor.lightGray if PYQT_VERSION == 6 else Qt.lightGray)
+        painter.fillRect(self.rect(), GlobalColor.lightGray)
         
         # Calculer les positions des handles
         total_width = self.width() - 20
@@ -65,15 +52,15 @@ class RangeSlider(QSlider):
         
         # Dessiner la zone sélectionnée
         selected_rect = QRect(low_pos, 5, high_pos - low_pos, self.height() - 10)
-        painter.fillRect(selected_rect, Qt.GlobalColor.blue if PYQT_VERSION == 6 else Qt.blue)
+        painter.fillRect(selected_rect, GlobalColor.blue)
         
         # Dessiner les handles
-        painter.fillRect(low_pos - 5, 2, 10, self.height() - 4, Qt.GlobalColor.darkBlue if PYQT_VERSION == 6 else Qt.darkBlue)
-        painter.fillRect(high_pos - 5, 2, 10, self.height() - 4, Qt.GlobalColor.darkBlue if PYQT_VERSION == 6 else Qt.darkBlue)
+        painter.fillRect(low_pos - 5, 2, 10, self.height() - 4, GlobalColor.darkBlue)
+        painter.fillRect(high_pos - 5, 2, 10, self.height() - 4, GlobalColor.darkBlue)
     
     def mousePressEvent(self, event):
         total_width = self.width() - 20
-        click_pos = event.x() - 10
+        click_pos = event.pos().x() - 10
         value = int((click_pos / total_width) * 255)
         
         low_pos = int((self._low / 255) * total_width)
@@ -91,9 +78,9 @@ class RangeSlider(QSlider):
         self.sliderMoved.emit(self._low, self._high)
     
     def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.LeftButton:
+        if event.buttons() & (MouseButton.LeftButton):
             total_width = self.width() - 20
-            click_pos = event.x() - 10
+            click_pos = event.pos().x() - 10
             value = max(0, min(255, int((click_pos / total_width) * 255)))
             
             if self.active_slider == 0:
@@ -116,27 +103,27 @@ class DatasetSelectionWidget(QFrame):
     """
     
     # dataset cliqué => "viewing"
-    dataset_view_requested = pyqtSignal(str)
+    dataset_view_requested = Signal(str)
     
     # la sélection (checkbox) a changé => utile pour activer des boutons, batch, etc.
-    selection_changed = pyqtSignal()
+    selection_changed = Signal()
     
     def __init__(self, parent=None, title="Datasets:"):
         super().__init__(parent)
         
-        self.datasets = {}          # dict[str, DatasetInfo]
+        self.datasets = {}  # dict[str, DatasetInfo]
         self._current_view = None   # str | None
         self._updating_ui = False
         self._locked = False  # lock dataset switching during analysis
         
         
-        self.setFrameStyle(QFrame.Shape.StyledPanel if PYQT_VERSION == 6 else QFrame.StyledPanel)
+        self.setFrameStyle(FrameShape.StyledPanel)
         
         layout = QVBoxLayout(self)
         
         # Titre
         self.datasets_title = QLabel(title)
-        self.datasets_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        self.datasets_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         layout.addWidget(self.datasets_title)
         
         # Boutons select/deselect
@@ -160,18 +147,18 @@ class DatasetSelectionWidget(QFrame):
         self.selected_count_label = QLabel("Selected: 0/0")
         layout.addWidget(self.current_view_label)
         layout.addWidget(self.selected_count_label)
-    
+        
     # -------------------------
     # Helpers Qt compat
     # -------------------------
     def _checked(self):
-        return Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked
+        return CheckState.Checked
     
     def _unchecked(self):
-        return Qt.CheckState.Unchecked if PYQT_VERSION == 6 else Qt.Unchecked
+        return CheckState.Unchecked
     
     def _user_checkable_flag(self):
-        return Qt.ItemFlag.ItemIsUserCheckable if PYQT_VERSION == 6 else Qt.ItemIsUserCheckable
+        return ItemFlag.ItemIsUserCheckable
     
     # -------------------------
     # API publique
@@ -339,7 +326,7 @@ class PreviewWidget(QLabel):
         # Ne pas définir de taille maximum pour permettre l'expansion
         self.setScaledContents(False)  # Important pour gérer nous-mêmes le scaling
         self.setStyleSheet("border: 1px solid gray;")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding if PYQT_VERSION == 6 else QSizePolicy.Expanding, QSizePolicy.Policy.Expanding if PYQT_VERSION == 6 else QSizePolicy.Expanding)
+        self.setSizePolicy(SizePolicy.Expanding, SizePolicy.Expanding)
         
         # Variables
         self.original_image = None
@@ -354,7 +341,7 @@ class PreviewWidget(QLabel):
         """Définit les coordonnées de sélection (QRect)"""
         self.selection_coords = coords
         
-    def updatePreview(self, red_range, green_range, blue_range, red_invert, green_invert, blue_invert, closing_kernel=None, keep_max_component_only=False, object_size=0):
+    def updatePreview(self, red_range, green_range, blue_range, red_invert, green_invert, blue_invert, closing_kernel=None, keep_max_component_only=False, min_connected_components_area=0, max_centroid_dst=0.0, object_size=0):
         """Met à jour la prévisualisation avec les nouveaux paramètres de seuillage"""
         if self.original_image is None:
             return
@@ -392,7 +379,39 @@ class PreviewWidget(QLabel):
             
             max_label = np.argmax(label_count)
             segmented = np.array(labels == max_label, dtype='uint8') * 255
+        
+        if min_connected_components_area > 0:
+            (n_labels, label_ids, values, centroid)  = cv2.connectedComponentsWithStats(segmented, 8)
+            clean_mask = np.zeros_like(segmented, dtype='uint8')
+            for i in range(1, n_labels):
+                area = values[i, cv2.CC_STAT_AREA]
+                if area > min_connected_components_area:
+                    component_mask = (label_ids == i).astype("uint8") * 255
+                    clean_mask = cv2.bitwise_or(clean_mask, component_mask)
             
+            clean_mask = np.array(clean_mask > 0, dtype='uint8') * 255
+            
+            if max_centroid_dst > 0.0:
+                diff_mask = segmented - clean_mask
+                (n_labels_diff, label_ids_diff, values_diff, centroid_diff)  = cv2.connectedComponentsWithStats(diff_mask, 8)
+                (n_labels_clean, label_ids_clean, values_clean, centroid_clean)  = cv2.connectedComponentsWithStats(clean_mask, 8)
+                
+                dst_centroid = np.zeros([n_labels_diff-1, n_labels_clean-1], dtype='float32')
+                for k in range(1, n_labels_diff):
+                    for l in range(1, n_labels_clean):
+                        dst_centroid[k-1, l-1] = lg.norm(np.abs(centroid_diff[k, :] - centroid_clean[l, :]))
+                
+                min_dst = np.min(dst_centroid, axis=1)
+                
+                idx_keep_comp = np.where(min_dst < max_centroid_dst)[0]
+                new_mask = np.zeros_like(segmented, dtype='uint8')
+                for idx_comp in idx_keep_comp:
+                    comp_mask = (label_ids_diff == idx_comp).astype("uint8") * 255
+                    new_mask = cv2.bitwise_or(new_mask, comp_mask)
+                
+                clean_mask = cv2.bitwise_or(new_mask, clean_mask)
+            clean_mask
+            segmented = cv2.bitwise_and(segmented, clean_mask)
         
         # Appliquer la suppression de bruit
         if object_size > 0:
@@ -442,10 +461,10 @@ class PreviewWidget(QLabel):
         height, width = image.shape[:2]
         if len(image.shape) == 3:
             bytes_per_line = 3 * width
-            q_image = QImage(image, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
+            q_image = QImage(image, width, height, bytes_per_line, ImageFormat.Format_RGB888)
         else:
             bytes_per_line = width
-            q_image = QImage(image, width, height, bytes_per_line, QImage.Foramt.Format_Grayscale8 if PYQT_VERSION == 6 else QImage.Format_Grayscale8)
+            q_image = QImage(image, width, height, bytes_per_line, ImageFormat.Format_Grayscale8)
         
         # Convertir en QPixmap
         self.current_pixmap = QPixmap.fromImage(q_image)
@@ -457,7 +476,7 @@ class PreviewWidget(QLabel):
         """Redimensionne proprement le pixmap en gardant le ratio"""
         super().resizeEvent(event)
         self._updateScaledPixmap()
-
+    
     def _updateScaledPixmap(self):
         """Met à jour l'affichage avec la bonne mise à l'échelle"""
         if self.current_pixmap is not None and not self.current_pixmap.isNull():
@@ -477,11 +496,11 @@ class PreviewWidget(QLabel):
             # Redimensionner le pixmap
             scaled_pixmap = self.current_pixmap.scaled(
                 new_width, new_height, 
-                Qt.AspectRatioMode.KeepAspectRatio if PYQT_VERSION == 6 else Qt.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation if PYQT_VERSION == 6 else Qt.SmoothTransformation
+                QtCompat.KeepAspectRatio, QtCompat.SmoothTransformation
             )
             
             # Centrer le pixmap dans le widget
-            self.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+            self.setAlignment(QtCompat.AlignCenter)
             self.setPixmap(scaled_pixmap)
     
     def paintEvent(self, event):
@@ -490,7 +509,7 @@ class PreviewWidget(QLabel):
 
 
 class EnhancedOptionsWindow(QWidget):
-    def __init__(self, window_title, icons_directory, parent_app=None, init_params=None, window_width=1400, window_height=900):
+    def __init__(self, window_title, icons_directory, parent_app=None, init_params=None, window_width=1400, window_height=1000):
         super().__init__()
         self.window_title = window_title
         self.icons_directory = icons_directory
@@ -515,6 +534,12 @@ class EnhancedOptionsWindow(QWidget):
         self.default_object_size = self.init_params.get('min_object_size', 800)
         self.max_object_size_value = 1e10
         self.min_object_size = self.default_object_size
+        self.default_connected_components_value = self.init_params.get('min_connected_component_area', 0)
+        self.max_min_connected_components_area = 1e6
+        self.min_connected_components_area = self.default_connected_components_value
+        self.default_max_centroid_dst = self.init_params.get('max_centroid_dst', 0.0)
+        self.max_max_centroid_dst = 1e6
+        self.max_centroid_dst = self.default_max_centroid_dst
         self.kernel_shape_dict = {"Rectangle":cv2.MORPH_RECT, "Cross":cv2.MORPH_CROSS, "Ellipse":cv2.MORPH_ELLIPSE}
         self.default_kernel_size = 0
         self.default_kernel_shape_index = 0
@@ -537,26 +562,59 @@ class EnhancedOptionsWindow(QWidget):
         # Panel de gauche (contrôles) - taille fixe
         left_panel = self._createControlPanel()
         left_panel.setFixedWidth(400)  # Largeur fixe pour les contrôles
-        main_layout.addWidget(left_panel)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        try:
+            left_scroll.setFrameShape(FrameShape.NoFrame)
+        except Exception:
+            pass
+        
+        left_scroll.setWidget(left_panel)
+        
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = FocusPolicy.StrongFocus
+        for w in left_panel.findChildren((QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
+        
+        # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
+        try:
+            left_scroll.setHorizontalScrollBarPolicy(ScrollBarPolicy.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        
+        # On garde une largeur stable pour le panneau de gauche (incluant une éventuelle scrollbar)
+        try:
+            left_scroll.setMinimumWidth(420)
+        except Exception:
+            pass
+        
+        main_layout.addWidget(left_scroll)
         
         # Panel de droite (prévisualisation) - extensible
         right_panel = self._createPreviewPanel()
         main_layout.addWidget(right_panel)
         
         # Proportions : contrôles fixes, prévisualisation extensible
-        main_layout.setStretchFactor(left_panel, 0)  # Pas d'étirement
+        main_layout.setStretchFactor(left_scroll, 0)  # Pas d'étirement
         main_layout.setStretchFactor(right_panel, 1)  # S'étire pour remplir l'espace
     
     def _createControlPanel(self):
         """Crée le panel de contrôles"""
         panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.StyledPanel if PYQT_VERSION == 6 else QFrame.StyledPanel)
+        panel.setFrameStyle(FrameShape.StyledPanel)
         layout = QVBoxLayout(panel)
         
         # Titre
         title = QLabel("RGB Threshold Settings")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        title.setFont(QFont("Arial", 12, FontWeight.Bold))
+        title.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(title)
         
         # Contrôles Rouge
@@ -572,9 +630,14 @@ class EnhancedOptionsWindow(QWidget):
         layout.addWidget(blue_group)
         
         # Remove outliers part
+        # Séparateur
+        h_separator = QFrame()
+        h_separator.setFrameShape(FrameShape.HLine)
+        layout.addWidget(h_separator)
+        
         remove_outliers_title = QLabel("Remove Outliers")
-        remove_outliers_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        remove_outliers_title.setAlignment(Qt.AlignmentFlag.AlignLeft if PYQT_VERSION == 6 else Qt.AlignLeft)
+        remove_outliers_title.setFont(QFont("Arial", 12, FontWeight.Bold))
+        remove_outliers_title.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(remove_outliers_title)
         
         self.remove_outliers_layout = QVBoxLayout()
@@ -590,6 +653,27 @@ class EnhancedOptionsWindow(QWidget):
         self.keep_max_component_layout.addWidget(self.keep_max_component_checkbox)
         self.remove_outliers_layout.addLayout(self.keep_max_component_layout)
         
+        self.min_connected_components_layout = QHBoxLayout()
+        self.min_connected_components_label = QLabel("Minimum connected components area:")
+        self.min_connected_components_entry = QLineEdit()
+        self.min_connected_components_entry.setValidator(QIntValidator())
+        self.min_connected_components_entry.setText(str(self.default_connected_components_value))
+        self.min_connected_components_entry.editingFinished.connect(self._updateMinimumConnectedComponents)
+        self.min_connected_components_layout.addWidget(self.min_connected_components_label)
+        self.min_connected_components_layout.addWidget(self.min_connected_components_entry)
+        self.remove_outliers_layout.addLayout(self.min_connected_components_layout)
+        
+        self.max_centroid_dst_layout = QHBoxLayout()
+        self.max_centroid_dst_label = QLabel("Maximum centroid distance:")
+        self.max_centroid_dst_spin = QDoubleSpinBox()
+        self.max_centroid_dst_spin.setRange(0.0, self.max_max_centroid_dst)
+        self.max_centroid_dst_spin.setValue(self.default_max_centroid_dst)
+        self.max_centroid_dst_spin.setSingleStep(10.0)
+        self.max_centroid_dst_spin.valueChanged.connect(self._updateMaximumCentroidDistance)
+        self.max_centroid_dst_layout.addWidget(self.max_centroid_dst_label)
+        self.max_centroid_dst_layout.addWidget(self.max_centroid_dst_spin)
+        self.remove_outliers_layout.addLayout(self.max_centroid_dst_layout)
+        
         self.object_size_layout = QHBoxLayout()
         self.object_size_label = QLabel("Minimum object size:")
         self.object_size_entry = QLineEdit()
@@ -602,7 +686,7 @@ class EnhancedOptionsWindow(QWidget):
         
         self.kernelSizeLayout = QHBoxLayout()
         self.closing_kernel_label = QLabel("Morphological operation kernel:")
-        self.closing_kernel_label.setFont(QFont("Arial", 8, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        self.closing_kernel_label.setFont(QFont("Arial", 10, FontWeight.Bold))
         self.kernel_size_label = QLabel("Closing kernel size:")
         self.kernel_size_field = QLineEdit()
         self.kernel_size_field.setValidator(QIntValidator())
@@ -628,6 +712,10 @@ class EnhancedOptionsWindow(QWidget):
         # Boutons
         button_layout = QHBoxLayout()
         
+        self.updatePreviewButton = QPushButton("Update preview")
+        self.updatePreviewButton.clicked.connect(self._updatePreview)
+        button_layout.addWidget(self.updatePreviewButton)
+        
         self.applyButton = QPushButton("Apply")
         self.applyButton.clicked.connect(self._applySettings)
         button_layout.addWidget(self.applyButton)
@@ -644,12 +732,12 @@ class EnhancedOptionsWindow(QWidget):
     def _createColorGroup(self, color_name, color_key):
         """Crée un groupe de contrôles pour une couleur"""
         group = QFrame()
-        group.setFrameStyle(QFrame.Shape.Box if PYQT_VERSION == 6 else QFrame.Box)
+        group.setFrameStyle(FrameShape.Box)
         layout = QVBoxLayout(group)
         
         # Titre du groupe
         title = QLabel(f"{color_name} Channel")
-        title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        title.setFont(QFont("Arial", 10, FontWeight.Bold))
         layout.addWidget(title)
         
         # Labels de valeurs
@@ -664,7 +752,7 @@ class EnhancedOptionsWindow(QWidget):
         layout.addLayout(value_layout)
         
         # Range slider
-        range_slider = RangeSlider(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        range_slider = RangeSlider(QtCompat.Horizontal)
         range_slider.setMinimum(0)
         range_slider.setMaximum(255)
         range_slider.setLow(0)
@@ -699,13 +787,13 @@ class EnhancedOptionsWindow(QWidget):
     def _createPreviewPanel(self):
         """Crée le panel de prévisualisation"""
         panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.StyledPanel if PYQT_VERSION == 6 else QFrame.StyledPanel)
+        panel.setFrameStyle(FrameShape.StyledPanel)
         layout = QVBoxLayout(panel)
         
         # Titre
         title = QLabel("Preview")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        title.setFont(QFont("Arial", 12, FontWeight.Bold))
+        title.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(title)
         
         # Widget de prévisualisation - maintenant extensible
@@ -714,7 +802,7 @@ class EnhancedOptionsWindow(QWidget):
         
         # Informations
         info_label = QLabel("Select an area in the main window to preview the threshold effect")
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        info_label.setAlignment(QtCompat.AlignCenter)
         info_label.setWordWrap(True)
         info_label.setFixedHeight(40)  # Hauteur fixe pour les infos
         layout.addWidget(info_label)
@@ -758,12 +846,28 @@ class EnhancedOptionsWindow(QWidget):
     def _changeFusionMaskState(self):
         """Met à jour la valeur de la variable associée à l'état de la CheckBox de fusion des masques"""
         self.fusion_previous_masks = self.fusion_previous_masks_checkbox.isChecked()
-        self._updatePreview()
     
     def _updateKeepMaxComponentState(self):
         self.keep_max_component_only = self.keep_max_component_checkbox.isChecked()
-        # Mettre à jour la prévisualisation
-        self._updatePreview()
+    
+    def _updateMinimumConnectedComponents(self):
+        """Met à jour la valeur de l'aire minimale des composantes connexes"""
+        try:
+            entry_value = int(self.min_connected_components_entry.text())
+            min_area = max(0, min(self.max_min_connected_components_area, entry_value))
+            if min_area != entry_value:
+                self.min_connected_components_entry.setText(str(self.min_connected_components_area))
+            
+            self.min_connected_components_area = min_area
+        except:
+            print("Error: a positive integer is expected for the value of the minimum area of the connected components.")
+    
+    def _updateMaximumCentroidDistance(self):
+        """Met à jour la valeur de la distance maximale entre centroides des composantes connexes restantes et celles supprimées car d'aires trop petites"""
+        try:
+            self.max_centroid_dst = self.max_centroid_dst_spin.value()
+        except:
+            print("Error: a positive float is expected for the value of the minimum distance between centroids of connected components.")
     
     def _updateObjectSizeValue(self):
         """Met à jour la valeur de la taille minimum des objets"""
@@ -774,8 +878,6 @@ class EnhancedOptionsWindow(QWidget):
                 self.object_size_entry.setText(str(self.min_object_size))
             
             self.min_object_size = min_size
-            # Mettre à jour la prévisualisation
-            self._updatePreview()
         except:
             print("Error: a strictly positive integer is expected for the value of the minimum size of objects.")
     
@@ -790,8 +892,6 @@ class EnhancedOptionsWindow(QWidget):
             self.kernel_size = (ksize, ksize)
             # Mis à jour du noyau
             self._updateClosingKernel()
-            # Mettre à jour la prévisualisation
-            self._updatePreview()
         except:
             print("Error: a strictly positive integer is expected for the value of the closing kernel size.")
     
@@ -803,8 +903,6 @@ class EnhancedOptionsWindow(QWidget):
         self.kernel_shape_value = self.kernel_shape_dict[shape_name]
         # Mis à jour du noyau
         self._updateClosingKernel()
-        # Mettre à jour la prévisualisation
-        self._updatePreview()
     
     def _updateClosingKernel(self):
         """Met à jour le noyau pour l'opération morphologique de fermeture"""
@@ -824,6 +922,8 @@ class EnhancedOptionsWindow(QWidget):
             self.blue_inverted_values,
             closing_kernel=self.closing_kernel,
             keep_max_component_only=self.keep_max_component_only,
+            min_connected_components_area=self.min_connected_components_area,
+            max_centroid_dst=self.max_centroid_dst,
             object_size=self.min_object_size
         )
     
@@ -893,10 +993,10 @@ def test_threshold_window():
     window.setImageData(test_image)
     window.show()
     
-    if PYQT_VERSION == 6:
-        app.exec()
-    else:
-        app.exec_()
+    exec_app(app)
+
+
+__all__ = ["RangeSlider", "DatasetSelectionWidget", "PreviewWidget", "EnhancedOptionsWindow", "test_threshold_window"]
 
 
 if __name__ == "__main__":

@@ -1,6 +1,16 @@
+import warnings
+
+# Suppression des "warnings" potentiels avec certaines combinaisons de Python et PyQt (par exemple Python 3.9 et PyQt6 < 6.6.0)
+warnings.filterwarnings(
+    "ignore",
+    message="sipPyTypeDict\\(\\) is deprecated",
+    category=DeprecationWarning,
+)
+
 import cv2, os, sys
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.linalg as lg
 import pandas as pd
 import seaborn as sns
 import tifffile as tiff
@@ -11,30 +21,19 @@ sns.set_context("notebook", font_scale=1.1)
 
 from collections import deque
 from datetime import datetime, timedelta
+from matplotlib.backends.backend_qtagg import FigureCanvas
 from skimage.morphology import convex_hull_image, remove_small_objects, skeletonize
 
-PYQT_AVAILABLE = False
-PYQT_VERSION = None
+from compat import ( PYQT_AVAILABLE, PYQT_VERSION, Qt, QPoint, QRect, QTimer, QSize, QLocale, Signal, Slot, QThread, QObject, QApplication, QWidget, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, 
+                    QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QSpinBox, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, 
+                    QDialog, QProgressBar, QScrollArea, QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence, QAction, QtCompat, BrushStyle, CheckState, FocusPolicy, FontWeight, FontStyle, 
+                    FrameShape, ImageFormat, ItemFlag, MouseButton, ScrollBarPolicy, SizePolicy, exec_app, exec_dialog )
 
-try:
-    from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
-    from PyQt6.QtWidgets import QApplication, QWidget, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
-    from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence, QAction
-    PYQT_AVAILABLE = True
-    PYQT_VERSION = 6
-except:
-    try:
-        from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, QSize, QLocale, pyqtSignal, QThread, pyqtSlot
-        from PyQt5.QtWidgets import QApplication, QWidget, QAction, QMainWindow, QLabel, QToolButton, QPushButton, QMessageBox, QLineEdit, QFileDialog, QInputDialog, QTextEdit, QGridLayout, QComboBox, QColorDialog, QSlider, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QMenu, QMenuBar, QSizePolicy, QProgressDialog, QTabWidget, QListWidget, QListWidgetItem, QSplitter, QDialog, QProgressBar, QScrollArea
-        from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QBitmap, QPainter, QRegion, QImage, QIntValidator, QDoubleValidator, QKeySequence
-        PYQT_AVAILABLE = True
-        PYQT_VERSION = 5
-    except:
-        print("This script requires PyQt5 or PyQt6 to run. Neither of these versions was found!")
 
 from utils import *
 from widgets import *
-from window_analyzer import *
+from window_analyzer import RootArchitectureWindow
+from window_image_editor import ImageEditorWindow
 
 
 # Export des données relatives à l'aire des enveloppes convexes et du nombre de pixels représentant l'objet segmenté (racines ou feuilles) dans un fichier CSV
@@ -92,12 +91,12 @@ def ensure_rgb(image, path_hint=None):
 
 class ProcessingWorker(QThread):
     """Thread worker pour le traitement en arrière-plan avec signaux de progression"""
-    progress_update = pyqtSignal(str, int, int)  # message, current, total
-    step_completed = pyqtSignal(str)  # message de fin d'étape
-    finished_processing = pyqtSignal()
-    error_occurred = pyqtSignal(str)
+    progress_update = Signal(str, int, int)  # message, current, total
+    step_completed = Signal(str)  # message de fin d'étape
+    finished_processing = Signal()
+    error_occurred = Signal(str)
     
-    def __init__(self, parent_app, selected_datasets, active_analyses, crop=True, segment=True):
+    def __init__(self, parent_app, selected_datasets, active_analyses, parameters={}, crop=True, segment=True):
         super().__init__()
         self.parent_app = parent_app
         self.crop = crop
@@ -107,6 +106,13 @@ class ProcessingWorker(QThread):
         self.should_stop = False
         self.kernel_shape_dict = {"Rectangle":cv2.MORPH_RECT, "Cross":cv2.MORPH_CROSS, "Ellipse":cv2.MORPH_ELLIPSE}
         self.kernel_keys_list = list(self.kernel_shape_dict.keys())
+        
+        self.default_parameters = {'Separator':'_', 'IndexModality':0}
+        self.parameters = {}
+        for key, value in self.default_parameters.items():
+            self.parameters[key] = parameters.get(key, value)
+        
+        print(self.parameters)
     
     def run(self):
         try:
@@ -126,6 +132,7 @@ class ProcessingWorker(QThread):
                     if not config.selection_coords and self.parent_app.current_image_array is not None:
                         height, width = self.parent_app.current_image_array.shape[:2]
                         config.selection_coords = QRect(0, 0, width, height)
+                        config.selection_coords_ratio = [0.0, 0.0, 1.0, 1.0]
                     
                     for dataset_name in self.selected_datasets:
                         if self.should_stop:
@@ -144,8 +151,14 @@ class ProcessingWorker(QThread):
                             
                             image_path = os.path.join(dataset_info.path, image_name)
                             image = image_read(image_path)
+                            height, width = image.shape[:2]
                             
-                            rect = config.selection_coords
+                            coords_ratio = config.selection_coords_ratio
+                            rect = QRect(round(coords_ratio[0] * width),
+                                         round(coords_ratio[1] * height),
+                                         round(coords_ratio[2] * width),
+                                         round(coords_ratio[3] * height))
+                            
                             crop_image = image[rect.y():rect.y() + rect.height(),
                                              rect.x():rect.x() + rect.width()]
                             
@@ -226,13 +239,13 @@ class ProcessingWorker(QThread):
             image_path = os.path.join(source_directory, image_name)
             
             # Extraction des informations du nom
-            split_name = image_name.split(os.extsep)[0].split('_')
+            split_name = image_name.split(os.extsep)[0].split(self.parameters['Separator'])
             image_moda, image_day = 'NaN', 'NaN'
             for idx, name_part in enumerate(split_name):
-                if idx == 0:
+                if idx == self.parameters['IndexModality']:
                     image_moda = name_part
                 else:
-                    if name_part[0].lower() == 'j':
+                    if name_part[0].lower() in ['j', 'd']:
                         image_day = int(name_part[1:])
             
             # Charger et traiter l'image
@@ -256,6 +269,39 @@ class ProcessingWorker(QThread):
                 
                 max_label = np.argmax(label_count)
                 binary_image = np.array(labels == max_label, dtype='uint8') * 255
+            
+            if params['min_connected_components_area'] > 0:
+                (n_labels, label_ids, values, centroid)  = cv2.connectedComponentsWithStats(binary_image, 8)
+                clean_mask = np.zeros_like(binary_image, dtype='uint8')
+                for j in range(1, n_labels):
+                    area = values[j, cv2.CC_STAT_AREA]
+                    if area > params['min_connected_components_area']:
+                        component_mask = (label_ids == j).astype("uint8") * 255
+                        clean_mask = cv2.bitwise_or(clean_mask, component_mask)
+                
+                clean_mask = np.array(clean_mask > 0, dtype='uint8') * 255
+                
+                if params['max_centroid_dst'] > 0.0:
+                    diff_mask = binary_image - clean_mask
+                    (n_labels_diff, label_ids_diff, values_diff, centroid_diff)  = cv2.connectedComponentsWithStats(diff_mask, 8)
+                    (n_labels_clean, label_ids_clean, values_clean, centroid_clean)  = cv2.connectedComponentsWithStats(clean_mask, 8)
+                    
+                    dst_centroid = np.zeros([n_labels_diff-1, n_labels_clean-1], dtype='float32')
+                    for k in range(1, n_labels_diff):
+                        for l in range(1, n_labels_clean):
+                            dst_centroid[k-1, l-1] = lg.norm(np.abs(centroid_diff[k, :] - centroid_clean[l, :]))
+                    
+                    min_dst = np.min(dst_centroid, axis=1)
+                    
+                    idx_keep_comp = np.where(min_dst < params['max_centroid_dst'])[0]
+                    new_mask = np.zeros_like(image, dtype='uint8')
+                    for idx_comp in idx_keep_comp:
+                        comp_mask = (label_ids_diff == idx_comp).astype("uint8") * 255
+                        new_mask = cv2.bitwise_or(new_mask, comp_mask)
+                    
+                    clean_mask = cv2.bitwise_or(new_mask, clean_mask)
+                
+                binary_image = cv2.bitwise_and(binary_image, clean_mask)
             
             # Suppression du bruit
             if params['min_object_size'] > 0:
@@ -355,13 +401,13 @@ class ProgressWindow(QDialog):
         
         # Titre
         self.title_label = QLabel("Processing datasets...")
-        self.title_label.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        self.title_label.setFont(QFont("Arial", 12, QFontWeight.Bold))
+        self.title_label.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(self.title_label)
         
         # Message de statut
         self.status_label = QLabel("Initializing...")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        self.status_label.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(self.status_label)
         
         # Barre de progression principale
@@ -394,7 +440,7 @@ class ProgressWindow(QDialog):
         self.worker.error_occurred.connect(self.handle_error)
         self.worker.start()
     
-    @pyqtSlot(str, int, int)
+    @Slot(str, int, int)
     def update_progress(self, message, current, total):
         """Met à jour la barre de progression"""
         self.status_label.setText(message)
@@ -404,13 +450,13 @@ class ProgressWindow(QDialog):
         else:
             self.main_progress.setRange(0, 0)  # Mode indéterminé
     
-    @pyqtSlot(str)
+    @Slot(str)
     def add_log_message(self, message):
         """Ajoute un message au log"""
         self.log_area.append(f"✓ {message}")
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
     
-    @pyqtSlot()
+    @Slot()
     def processing_finished(self):
         """Appelé quand le traitement est terminé"""
         self.status_label.setText("Processing completed successfully!")
@@ -418,7 +464,7 @@ class ProgressWindow(QDialog):
         self.add_log_message("All processing completed successfully!")
         self.cancel_button.setText("Close")
     
-    @pyqtSlot(str)
+    @Slot(str)
     def handle_error(self, error_message):
         """Gère les erreurs du traitement"""
         self.status_label.setText("Error occurred during processing")
@@ -440,6 +486,7 @@ class AnalysisConfig:
         self.name = name
         self.enabled = check_state
         self.selection_coords = None
+        self.selection_coords_ratio = None
         self.default_threshold_params = {
                                             'red_range': (0, 255),
                                             'green_range': (0, 255), 
@@ -450,18 +497,18 @@ class AnalysisConfig:
                                             'min_branch_length': 20.0,
                                             'max_connection_dst': 240,
                                             'keep_max_component': False,
-                                            'min_object_size': 800,
+                                            'min_connected_components_area': 0,
+                                            'max_centroid_dst': 0.0,
+                                            'min_object_size': 200,
                                             'kernel_size': 5,
                                             'kernel_shape': cv2.MORPH_RECT,
                                             'fusion_masks': True
                                         }
         
         self.threshold_params = {}
-        if init_threshold_params is None:
-            self.threshold_params = self.default_threshold_params
-        else:
-            for key_name, key_value in self.default_threshold_params.items():
-                self.threshold_params[key_name] = init_threshold_params.get(key_name, key_value)
+        for key, value in self.default_threshold_params.items():
+            self.threshold_params[key] = init_threshold_params.get(key, value)
+
 
 class DatasetInfo:
     """Informations sur un jeu de données"""
@@ -485,7 +532,7 @@ class ImageDisplayWidget(QLabel):
         self.display_selection = display_selection
         self.setMinimumSize(400, 300)
         self.setScaledContents(False)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding if PYQT_VERSION == 6 else QSizePolicy.Expanding, QSizePolicy.Policy.Expanding if PYQT_VERSION == 6 else QSizePolicy.Expanding)
+        self.setSizePolicy(SizePolicy.Expanding, SizePolicy.Expanding)
         self.setStyleSheet("border: 1px solid gray;")
         
         # Variables pour la sélection
@@ -493,7 +540,9 @@ class ImageDisplayWidget(QLabel):
         self.start_point = None
         self.current_point = None
         self.selection_rect = None
+        self.original_image_shape = None
         self.original_selection_coords = None
+        self.original_selection_coords_ratio = None
         self.default_color = default_color
         self.rgb_paint_color = QColor(self.default_color[0], self.default_color[1], self.default_color[2], 255)
         
@@ -508,6 +557,8 @@ class ImageDisplayWidget(QLabel):
         
     def setImagePixmap(self, pixmap):
         self.original_pixmap = pixmap
+        pixmap_size = pixmap.size()
+        self.original_image_shape = (pixmap_size.height(), pixmap_size.width())
         self.updateDisplayedImage()
     
     def setImageArray(self, image_array):
@@ -516,15 +567,21 @@ class ImageDisplayWidget(QLabel):
             return
         
         self.image_array = image_array.copy()  # Stocker une copie de l'array
+        self.original_image_shape = self.image_array.shape[:2]
         
         # Convertir numpy array vers QPixmap
         height, width = image_array.shape[:2]
-        if len(image_array.shape) == 3:
-            bytes_per_line = 3 * width
-            q_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
+        channel = 1
+        if image_array.ndim == 3:
+            channel = image_array.shape[2]
+        
+        bytes_per_line = channel * width
+        if channel == 3:
+            q_image = QImage(image_array.data, width, height, bytes_per_line, ImageFormat.Format_RGB888)
+        elif channel == 4:
+            q_image = QImage(image_array.data, width, height, bytes_per_line, ImageFormat.Format_RGBA8888)
         else:
-            bytes_per_line = width
-            q_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8 if PYQT_VERSION == 6 else QImage.Format_Grayscale8)
+            q_image = QImage(image_array.data, width, height, bytes_per_line, ImageFormat.Format_Grayscale8)
         
         pixmap = QPixmap.fromImage(q_image)
         self.setImagePixmap(pixmap)
@@ -535,6 +592,7 @@ class ImageDisplayWidget(QLabel):
             
         widget_size = self.size()
         pixmap_size = self.original_pixmap.size()
+        self.original_image_shape = (pixmap_size.height(), pixmap_size.width())
         
         scale_x = widget_size.width() / pixmap_size.width()
         scale_y = widget_size.height() / pixmap_size.height()
@@ -548,7 +606,7 @@ class ImageDisplayWidget(QLabel):
         
         self.scaled_pixmap = self.original_pixmap.scaled(
             scaled_width, scaled_height, 
-            Qt.AspectRatioMode.KeepAspectRatio if PYQT_VERSION == 6 else Qt.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation if PYQT_VERSION == 6 else Qt.SmoothTransformation
+            QtCompat.KeepAspectRatio, QtCompat.SmoothTransformation
         )
         
         self.image_rect = QRect(self.offset_x, self.offset_y, scaled_width, scaled_height)
@@ -583,7 +641,7 @@ class ImageDisplayWidget(QLabel):
         
         if self.display_selection and (self.selection_rect is not None):
             painter.setPen(self.rgb_paint_color)
-            painter.setBrush(Qt.BrushStyle.NoBrush if PYQT_VERSION == 6 else Qt.NoBrush)
+            painter.setBrush(BrushStyle.NoBrush)
             painter.drawRect(self.selection_rect)
     
     def changeColorSelection(self, new_rgb_color):
@@ -599,7 +657,7 @@ class ImageDisplayWidget(QLabel):
         if not self.parent_app or not self.parent_app.activeSelection:
             return
             
-        if event.button() == (Qt.MouseButton.LeftButton if PYQT_VERSION == 6 else Qt.LeftButton) and self.isPointInImage(event.pos()):
+        if event.button() == (MouseButton.LeftButton and self.isPointInImage(event.pos())):
             self.selection_active = True
             self.start_point = event.pos()
             self.current_point = event.pos()
@@ -614,7 +672,7 @@ class ImageDisplayWidget(QLabel):
             self.update()
     
     def mouseReleaseEvent(self, event):
-        if self.selection_active and event.button() == (Qt.MouseButton.LeftButton if PYQT_VERSION == 6 else Qt.LeftButton):
+        if self.selection_active and (event.button() == MouseButton.LeftButton):
             self.selection_active = False
             if self.selection_rect is not None:
                 real_coords = self.getOriginalImageCoordinates(self.selection_rect)
@@ -658,6 +716,21 @@ class ImageDisplayWidget(QLabel):
             self.selection_rect = None
         self.update()
     
+    def setSelectionCoordsRatio(self, coords_ratio):
+        """Définit les coordonnées de sélection en terme de proportion des dimensions de l'image depuis l'extérieur"""
+        self.original_selection_coords_ratio = coords_ratio
+        
+        if coords_ratio and self.original_image_shape:
+            height, width = self.original_image_shape
+            self.original_selection_coords = QRect(round(coords_ratio[0]*width), 
+                                                   round(coords_ratio[1]*height),
+                                                   round(coords_ratio[2]*width),
+                                                   round(coords_ratio[3]*height))
+            self.selection_rect = self.convertOriginalToDisplayCoords(self.original_selection_coords)
+        else:
+            self.selection_rect = None
+        self.update()
+    
     def clearImage(self):
         """Efface l'image affichée"""
         self.original_pixmap = None
@@ -678,7 +751,6 @@ class ImageDisplayWidget(QLabel):
         return self.image_array
 
 
-
 class App(QWidget):
     def __init__(self, current_script_name, current_directory, screen_size=None, parent=None):
         super(App, self).__init__(parent)
@@ -688,6 +760,7 @@ class App(QWidget):
         self.current_script_name = current_script_name
         self.current_directory = current_directory
         self.root_arch_window = None
+        self.image_editor_window = None
         
         # Variables d'interface
         self.activeSelection = False
@@ -695,8 +768,9 @@ class App(QWidget):
         self.rgb_color = [56, 166, 239]
         self.current_tab_index = 0
         
-        # Variable pour stocker la sélection temporaire en cours
+        # Variables pour stocker la sélection temporaire en cours
         self.temp_selection_coords = None
+        self.temp_selection_coords_ratio = None
         
         # Configuration des analyses (globale pour tous les datasets)
         self.roots_checkbox_analysis_state = True
@@ -711,10 +785,12 @@ class App(QWidget):
                 'blue_invert': False,
                 'min_branch_length': 10.0,
                 'keep_max_component': False,
+                'min_connected_components_area': 0,
+                'max_centroid_dst': 0,
                 'min_object_size': 0,
                 'kernel_size': 0,
                 'kernel_shape': cv2.MORPH_RECT,
-                'fusion_masks' : True
+                'fusion_masks' : False
             }),
             "leaves": AnalysisConfig("Leaves", self.leaves_checkbox_analysis_state, {
                 'red_range': (0, 255),
@@ -725,6 +801,8 @@ class App(QWidget):
                 'blue_invert': False,
                 'min_branch_length': 10.0,
                 'keep_max_component': False,
+                'min_connected_components_area': 0,
+                'max_centroid_dst': 0,
                 'min_object_size': 0,
                 'kernel_size': 0,
                 'kernel_shape': cv2.MORPH_RECT,
@@ -735,6 +813,8 @@ class App(QWidget):
                                           'closing_shape': cv2.MORPH_RECT,
                                           'min_branch_length': 10.0,
                                           'keep_max_component': False,
+                                          'min_connected_components_area': 0,
+                                          'max_centroid_dst': 0,
                                           'min_object_size': 0,
                                           'line_thickness': 5,
                                           'temporal_merge': True,
@@ -757,17 +837,21 @@ class App(QWidget):
         self.default_output_directory = os.path.join(self.current_directory, "Analysis")
         os.makedirs(self.default_output_directory, exist_ok=True)
         
-        # Icons
-        self.icon_size = (32, 32)
-        self.logo_file_name = "logo_rtt.png"
-        self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
-        self.logo_pixmap = QPixmap(self.logo_file_path)
-        
-        self.logo_start_file_name = "logo_start.png"
-        self.logo_start_file_path = os.path.join(self.icons_directory, self.logo_start_file_name)
-        self.logo_start_shape = cv2.imread(self.logo_start_file_path, cv2.IMREAD_UNCHANGED).shape[:2]
-        self.start_icon_qsize = QSize(round(self.logo_start_shape[0] * 200 / self.logo_start_shape[1]), 200)
-        self.logo_start_icon = QIcon(self.logo_start_file_path)
+        # Logo
+        self.logo_max_width = 280
+        if PYQT_VERSION == 6:
+            self.logo_file_name = "logo_rtt_2.png"
+            self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+            if os.path.exists(self.logo_file_path):
+                self.logo_pixmap = QPixmap(self.logo_file_path)
+            else:
+                self.logo_file_name = "logo_rtt.png"
+                self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+                self.logo_pixmap = QPixmap(self.logo_file_path)
+        else:
+            self.logo_file_name = "logo_rtt.png"
+            self.logo_file_path = os.path.join(self.icons_directory, self.logo_file_name)
+            self.logo_pixmap = QPixmap(self.logo_file_path)
         
         # Images du dataset courant
         self.image_name_list = []
@@ -789,14 +873,35 @@ class App(QWidget):
         main_layout = QHBoxLayout(self)
         
         # Splitter principal
-        splitter = QSplitter(Qt.Orientation.Horizontal if PYQT_VERSION == 6 else Qt.Horizontal)
+        splitter = QSplitter(QtCompat.Horizontal)
         main_layout.addWidget(splitter)
         # Panel de gauche (dans un QScrollArea pour les petites résolutions)
         left_panel = self._createLeftPanel()
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame if PYQT_VERSION == 6 else QFrame.NoFrame)
+        left_scroll.setFrameShape(FrameShape.NoFrame)
         left_scroll.setWidget(left_panel)
+        
+        # --- Anti "roulette change les paramètres" ---
+        # Si l'utilisateur scrolle dans le panneau de gauche, on veut scroller la QScrollArea,
+        # pas changer les valeurs des SpinBox/ComboBox sous le curseur.
+        self._left_wheel_filter = WheelToScrollAreaFilter(left_scroll, self)
+        focus_policy = FocusPolicy.StrongFocus
+        for w in left_panel.findChildren((QSpinBox, QDoubleSpinBox, QComboBox)):
+            try:
+                w.setFocusPolicy(focus_policy)
+                w.installEventFilter(self._left_wheel_filter)
+            except Exception:
+                pass
+        
+        # On évite le scrolling horizontal (on préfère wrapping + largeur fixe)
+        try:
+            left_scroll.setHorizontalScrollBarPolicy(
+                ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+        except Exception:
+            pass
+        
         # Empêche le panneau de gauche d'être écrasé verticalement : on scroll au lieu de compresser
         left_scroll.setMinimumWidth(320)
         splitter.addWidget(left_scroll)
@@ -811,14 +916,14 @@ class App(QWidget):
     def _createLeftPanel(self):
         panel = QFrame()
         panel.setMinimumWidth(300)
-        panel.setFrameStyle(QFrame.Shape.StyledPanel if PYQT_VERSION == 6 else QFrame.StyledPanel)
+        panel.setFrameStyle(FrameShape.StyledPanel)
         
         layout = QVBoxLayout(panel)
         
         # Titre
-        title = QLabel("Multi-Dataset Analysis Tool")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        title = QLabel("Dataset Analysis Tool")
+        title.setFont(QFont("Arial", 12, FontWeight.Bold))
+        title.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(title)
         
         # Boutons de dossier
@@ -836,7 +941,7 @@ class App(QWidget):
         # Explorateur de datasets avec sélection
         datasets_layout = QVBoxLayout()
         datasets_title = QLabel("Datasets:")
-        datasets_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        datasets_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         datasets_layout.addWidget(datasets_title)
         
         # Boutons de sélection globale
@@ -868,13 +973,13 @@ class App(QWidget):
         
         # Séparateur
         separator1 = QFrame()
-        separator1.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        separator1.setFrameShape(FrameShape.HLine)
         layout.addWidget(separator1)
         
         # Sélection du type d'analyse
         analysis_layout = QVBoxLayout()
         analysis_title = QLabel("Analysis Type:")
-        analysis_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        analysis_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         analysis_layout.addWidget(analysis_title)
         
         self.rootsRadio = QCheckBox("Roots Analysis")
@@ -891,13 +996,13 @@ class App(QWidget):
         
         # Séparateur
         separator2 = QFrame()
-        separator2.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        separator2.setFrameShape(FrameShape.HLine)
         layout.addWidget(separator2)
         
         # Outils de sélection
         tools_layout = QVBoxLayout()
         tools_title = QLabel("Selection Tools:")
-        tools_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        tools_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         tools_layout.addWidget(tools_title)
         
         tool_buttons_layout = QHBoxLayout()
@@ -924,7 +1029,7 @@ class App(QWidget):
         # NOUVEAUX BOUTONS DE CONFIRMATION DE SÉLECTION
         confirm_layout = QVBoxLayout()
         confirm_title = QLabel("Confirm Selections:")
-        confirm_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        confirm_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         confirm_layout.addWidget(confirm_title)
         
         confirm_buttons_layout = QHBoxLayout()
@@ -945,13 +1050,13 @@ class App(QWidget):
         
         # Séparateur
         separator3 = QFrame()
-        separator3.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        separator3.setFrameShape(FrameShape.HLine)
         layout.addWidget(separator3)
         
         # Actions par type d'analyse (MODIFIÉES)
         actions_layout = QVBoxLayout()
         actions_title = QLabel("Actions:")
-        actions_title.setFont(QFont("Arial", 10, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
+        actions_title.setFont(QFont("Arial", 10, FontWeight.Bold))
         actions_layout.addWidget(actions_title)
         
         # Actions pour racines (crop seulement)
@@ -985,8 +1090,8 @@ class App(QWidget):
         layout.addLayout(actions_layout)
         
         # Séparateur
-        separator3 = QFrame()
-        separator3.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
+        separator4 = QFrame()
+        separator4.setFrameShape(FrameShape.HLine)
         layout.addWidget(separator3)
         
         # Navigation
@@ -1006,15 +1111,23 @@ class App(QWidget):
         layout.addWidget(self.imageIndexLabel)
         
         # Logo
-        separator4 = QFrame()
-        separator4.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
-        layout.addWidget(separator4)
+        separator5 = QFrame()
+        separator5.setFrameShape(FrameShape.HLine)
+        layout.addWidget(separator5)
         
+        # --- Logo centré et responsive ---
         self.logo_label = QLabel()
-        self.logo_label.setPixmap(self.logo_pixmap.scaledToWidth(300))
-        layout.addWidget(self.logo_label, Qt.AlignmentFlag.AlignBottom if PYQT_VERSION == 6 else Qt.AlignBottom)
+        self.logo_label.setAlignment(QtCompat.AlignCenter)
+        
+        # Important : ne pas fixer directement scaledToWidth ici
+        self.logo_label.setPixmap(self.logo_pixmap)
         
         layout.addStretch()
+        layout.addWidget(self.logo_label)
+        
+        # Forcer une mise à jour au resize
+        panel.installEventFilter(self)
+        
         return panel
     
     def _createRightPanel(self):
@@ -1023,8 +1136,8 @@ class App(QWidget):
         
         # Titre
         self.imageNameTitle = QLabel("Image name")
-        self.imageNameTitle.setFont(QFont("Arial", 12, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
-        self.imageNameTitle.setAlignment(Qt.AlignmentFlag.AlignCenter if PYQT_VERSION == 6 else Qt.AlignCenter)
+        self.imageNameTitle.setFont(QFont("Arial", 12, FontWeight.Bold))
+        self.imageNameTitle.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(self.imageNameTitle)
         
         # Onglets pour les différentes vues
@@ -1066,15 +1179,41 @@ class App(QWidget):
         
         return widget
     
-    # NOUVELLE MÉTHODE: Confirmation de sélection
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.Resize:
+            self.updateLogoSize()
+        return super().eventFilter(obj, event)
+    
+    def updateLogoSize(self):
+        """Redimensionne le logo pour qu’il reste centré et adaptatif"""
+        if not hasattr(self, "logo_label") or self.logo_pixmap is None:
+            return
+        
+        # Largeur disponible dans le panneau gauche
+        available_width = self.logo_label.parent().width()
+        
+        # Taille finale = min(largeur panneau, max)
+        target_width = min(self.logo_max_width, available_width - 30)
+        
+        scaled = self.logo_pixmap.scaledToWidth(
+            target_width,
+            QtCompat.SmoothTransformation
+        )
+        
+        self.logo_label.setPixmap(scaled)
+    
+    
+    # Confirmation de sélection
     def confirmSelection(self, analysis_type):
         """Confirme et sauvegarde la sélection pour un type d'analyse"""
         # Si aucun sélection, on garde l'entièreté de l'image
-        if self.temp_selection_coords is None:
+        if self.temp_selection_coords_ratio is None:
             nr, nc = self.current_image_array.shape[:2]
             self.temp_selection_coords = QRect(0, 0, nc, nr)
+            self.temp_selection_coords_ratio = [0.0, 0.0, 1.0, 1.0]
         
-        if self.temp_selection_coords is not None:
+        if self.temp_selection_coords_ratio is not None:
+            self.analysis_configs[analysis_type].selection_coords_ratio = self.temp_selection_coords_ratio
             self.analysis_configs[analysis_type].selection_coords = self.temp_selection_coords
             self.current_analysis_type = analysis_type
             # Mettre à jour l'affichage
@@ -1136,8 +1275,8 @@ class App(QWidget):
         self.datasetsList.clear()
         for dataset_name in sorted(self.datasets.keys()):
             item = QListWidgetItem(dataset_name)
-            item.setFlags(item.flags() | (Qt.ItemFlag.ItemIsUserCheckable if PYQT_VERSION == 6 else Qt.ItemIsUserCheckable))
-            item.setCheckState((Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked) if self.datasets[dataset_name].selected else (Qt.CheckState.Unchecked if PYQT_VERSION == 6 else Qt.Unchecked))
+            item.setFlags(item.flags() | ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(CheckState.Checked if self.datasets[dataset_name].selected else CheckState.Unchecked)
             self.datasetsList.addItem(item)
         
         # Sélectionner le premier dataset par défaut pour l'affichage
@@ -1164,14 +1303,14 @@ class App(QWidget):
         """Appelé quand la checkbox d'un dataset change"""
         dataset_name = item.text()
         if dataset_name in self.datasets:
-            self.datasets[dataset_name].selected = (item.checkState() == (Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked))
+            self.datasets[dataset_name].selected = (item.checkState() == CheckState.Checked)
         self.updateSelectedCount()
     
     def selectAllDatasets(self):
         """Sélectionne tous les datasets"""
         for i in range(self.datasetsList.count()):
             item = self.datasetsList.item(i)
-            item.setCheckState(Qt.CheckState.Checked if PYQT_VERSION == 6 else Qt.Checked)
+            item.setCheckState(CheckState.Checked)
             dataset_name = item.text()
             if dataset_name in self.datasets:
                 self.datasets[dataset_name].selected = True
@@ -1181,7 +1320,7 @@ class App(QWidget):
         """Désélectionne tous les datasets"""
         for i in range(self.datasetsList.count()):
             item = self.datasetsList.item(i)
-            item.setCheckState(Qt.CheckState.Unchecked if PYQT_VERSION == 6 else Qt.Unchecked)
+            item.setCheckState(CheckState.Unchecked)
             dataset_name = item.text()
             if dataset_name in self.datasets:
                 self.datasets[dataset_name].selected = False
@@ -1303,9 +1442,9 @@ class App(QWidget):
         
         current_widget = self.tabWidget.currentWidget()
         if index == 1:  # Roots tab
-            current_widget.setSelectionCoords(self.analysis_configs["roots"].selection_coords)
+            current_widget.setSelectionCoordsRatio(self.analysis_configs["roots"].selection_coords_ratio)
         elif index == 2:  # Leaves tab
-            current_widget.setSelectionCoords(self.analysis_configs["leaves"].selection_coords)
+            current_widget.setSelectionCoordsRatio(self.analysis_configs["leaves"].selection_coords_ratio)
         elif index == 3:  # Roots Graph tab
             self.createSpecificGraph("roots")
         elif index == 4:  # Leaves Graph tab
@@ -1315,7 +1454,7 @@ class App(QWidget):
             if not self.activeSelection:
                 current_widget.clearSelection()
             elif self.current_analysis_type in self.analysis_configs:
-                current_widget.setSelectionCoords(self.analysis_configs[self.current_analysis_type].selection_coords)
+                current_widget.setSelectionCoordsRatio(self.analysis_configs[self.current_analysis_type].selection_coords_ratio)
     
     def createSpecificGraph(self, analysis_type):
         """Crée un graphique spécifique avec seaborn pour un rendu moderne"""
@@ -1489,10 +1628,20 @@ class App(QWidget):
         self.current_image_array = image_read(image_path)
         
         # Convertir en QPixmap
-        height, width, channel = self.current_image_array.shape
-        bytes_per_line = 3 * width
-        q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(q_image)
+        height, width = self.current_image_array.shape[:2]
+        channel = 1
+        if self.current_image_array.ndim == 3:
+            channel = self.current_image_array.shape[2]
+        
+        bytes_per_line = channel * width
+        if channel == 3:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, ImageFormat.Format_RGB888)
+        elif channel == 4:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, ImageFormat.Format_RGBA8888)
+        else:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, ImageFormat.Format_Grayscale8)
+        
+        pixmap = QPixmap.fromImage(q_image)    
         
         # Afficher dans l'onglet original
         self.originalTab.setImagePixmap(pixmap)
@@ -1541,11 +1690,29 @@ class App(QWidget):
                 else:
                     self.leavesTab.clearImage()
     
+    def convertSelectionCoordinatesRatio(self, coords_ratio):
+        if coords_ratio is not None:
+            height, width = self.current_image_array.shape[:2]
+            coords = QRect(round(coords_ratio[0] * width),
+                           round(coords_ratio[1] * height),
+                           round(coords_ratio[2] * width),
+                           round(coords_ratio[3] * height))
+            return(coords)
+    
+    def convertSelectionCoords(self, coords):
+        if coords is not None:
+            height, width = self.current_image_array.shape[:2]
+            coords_ratio = [coords.x() / width, 
+                            coords.y() / height,
+                            coords.width() / width, 
+                            coords.height() / height]
+            return(coords_ratio)
+    
     def updateAllSelections(self):
         """Met à jour les sélections affichées dans tous les onglets"""
-        self.originalTab.setSelectionCoords(self.analysis_configs[self.current_analysis_type].selection_coords)
-        self.rootsTab.setSelectionCoords(self.analysis_configs["roots"].selection_coords)
-        self.leavesTab.setSelectionCoords(self.analysis_configs["leaves"].selection_coords)
+        self.originalTab.setSelectionCoordsRatio(self.analysis_configs[self.current_analysis_type].selection_coords_ratio)
+        self.rootsTab.setSelectionCoordsRatio(self.analysis_configs["roots"].selection_coords_ratio)
+        self.leavesTab.setSelectionCoordsRatio(self.analysis_configs["leaves"].selection_coords_ratio)
         self.updateSelectionInfo()
     
     def openColorDialog(self):
@@ -1573,7 +1740,9 @@ class App(QWidget):
         """Appelée quand une sélection est terminée"""
         # Déterminer dans quel onglet la sélection a été faite
         current_index = self.tabWidget.currentIndex()
+        height, width = self.current_image_array.shape[:2]
         self.temp_selection_coords = original_coords
+        self.temp_selection_coords_ratio = self.convertSelectionCoords(self.temp_selection_coords)
         
         # Activer les boutons de confirmation
         self.confirmRootsSelectionButton.setEnabled(True)
@@ -1584,10 +1753,12 @@ class App(QWidget):
     def updateSelectionInfo(self):
         """Met à jour les informations de sélection affichées"""
         current_index = self.tabWidget.currentIndex()
+        height, width = self.current_image_array.shape[:2]
         
         # Afficher d'abord la sélection temporaire si elle existe
-        if self.temp_selection_coords:
-            coords = self.temp_selection_coords
+        if self.temp_selection_coords_ratio:
+            coords = self.convertSelectionCoordinatesRatio(self.temp_selection_coords_ratio)
+            
             info_prefix = "Temporary Selection:"
             info_text = f"{info_prefix}\nX: {coords.x()}, Y: {coords.y()}\nW: {coords.width()}, H: {coords.height()}\n\nClick 'Confirm' to apply"
         else:
@@ -1641,10 +1812,7 @@ class App(QWidget):
         # Créer et afficher la fenêtre de progression
         progress_window = ProgressWindow(self, crop_only=True)
         progress_window.start_processing(self, selected_datasets, [analysis_type])
-        if PYQT_VERSION == 6:
-            progress_window.exec()
-        else:
-            progress_window.exec_()
+        exec_dialog(progress_window)
         
         # Recharger l'image courante pour afficher la version croppée
         self.loadCroppedImages()
@@ -1726,6 +1894,9 @@ class App(QWidget):
         self.threshold_window.green_invert_checkbox.setChecked(params['green_invert'])
         self.threshold_window.blue_invert_checkbox.setChecked(params['blue_invert'])
         
+        # Configurer l'aire minimale des composantes connexes
+        self.threshold_window.min_connected_components_area = params['min_connected_components_area']
+        
         # Configurer la taille d'objet minimum
         self.threshold_window.min_object_size = params['min_object_size']
         self.threshold_window.object_size_entry.setText(str(params['min_object_size']))
@@ -1755,6 +1926,7 @@ class App(QWidget):
             'green_invert': invert_green,
             'blue_invert': invert_blue,
             'keep_max_component': getattr(self.threshold_window, 'keep_max_component', False),
+            'min_connected_components_area': getattr(self.threshold_window, 'min_connected_components_area', 0),
             'min_object_size': getattr(self.threshold_window, 'min_object_size', 0),
             'kernel_size': getattr(self.threshold_window, 'kernel_size', 5),
             'kernel_shape': getattr(self.threshold_window, 'kernel_shape_value', cv2.MORPH_RECT),
@@ -1775,6 +1947,7 @@ class App(QWidget):
         self.cleaning_mask_parameters['closing_shape'] = params['kernel_shape']
         self.cleaning_mask_parameters['min_branch_length'] = params['min_branch_length']
         self.cleaning_mask_parameters['keep_max_component'] = params['keep_max_component']
+        self.cleaning_mask_parameters['min_connected_components_area'] = params['min_connected_components_area']
         self.cleaning_mask_parameters['min_object_size'] = params['min_object_size']
         self.cleaning_mask_parameters['line_thickness'] = 5
         self.cleaning_mask_parameters['temporal_merge'] = params['fusion_masks']
@@ -1792,6 +1965,19 @@ class App(QWidget):
         else:
             self.root_arch_window.raise_()
             self.root_arch_window.activateWindow()
+    
+    def open_manual_editor(self):
+        if self.image_editor_window is None or not self.image_editor_window.isVisible():
+            self.image_editor_window = ImageEditorWindow(
+                parent=self,
+                datasets=self.datasets,
+                output_dir=self.base_output_directory
+            )
+            
+            self.image_editor_window.show()
+        else:
+            self.image_editor_window.raise_()
+            self.image_editor_window.activateWindow()
     
     def exportSegmentedImages(self):
         """Exporte les images segmentées pour le type d'analyse courant"""
@@ -1812,10 +1998,7 @@ class App(QWidget):
         # Créer et afficher la fenêtre de progression pour la segmentation
         progress_window = ProgressWindow(self, segment_only=True)
         progress_window.start_processing(self, selected_datasets, [analysis_type])
-        if PYQT_VERSION == 6:
-            progress_window.exec()
-        else:
-            progress_window.exec_()
+        exec_dialog(progress_window)
     
     
     def createGlobalCSV(self, analysis_type):
@@ -2045,9 +2228,10 @@ class App(QWidget):
 class ApplicationWindow(QMainWindow):
     def __init__(self, screen=None):
         super(ApplicationWindow, self).__init__()
+        self.image_editor = None
         self.screen = screen
         self.screen_size = [self.screen.size().width(), self.screen.size().height()]
-        self.max_main_window_size = [1800, 1300]
+        self.max_main_window_size = [1600, 1000]
         self.main_geometry = [0, 0, min(int(self.screen_size[0] * 0.9), self.max_main_window_size[0]), min(int(self.screen_size[1] * 0.9), self.max_main_window_size[1])]
         self.main_geometry[0] = min(100, self.screen_size[0] - self.main_geometry[2])
         self.main_geometry[1] = min(100, self.screen_size[1] - self.main_geometry[3])
@@ -2062,9 +2246,9 @@ class ApplicationWindow(QMainWindow):
         self.setCentralWidget(self.mainWidget)
         
         # Icons
-        self.logo_menu_file_name = "logo_menu.png"
-        self.logo_menu_file_path = os.path.join(self.icons_directory, self.logo_menu_file_name)
-        self.setWindowIcon(QIcon(self.logo_menu_file_path))
+        self.icon_menu_file_name = "IconRTT.png"
+        self.icon_menu_file_path = os.path.join(self.icons_directory, self.icon_menu_file_name)
+        self.setWindowIcon(QIcon(self.icon_menu_file_path))
         
         # Menu
         self._createMenuBar()
@@ -2138,18 +2322,18 @@ class ApplicationWindow(QMainWindow):
         view_menu.addAction(next_image)
 
 
+
 def main():
     app = QApplication(sys.argv)
     screen = app.primaryScreen()
     
     window = ApplicationWindow(screen=screen)
     window.show()
-    if PYQT_VERSION == 6:
-        sys.exit(app.exec())
-    else:
-        sys.exit(app.exec_())
+    sys.exit(exec_app(app))
 
 
 if __name__ == '__main__':
     if PYQT_AVAILABLE:
         main()
+    else:
+        print("This script requires PyQt5 / PySide2 or PyQt6 / PySide6 to run. Neither of these versions was found!")

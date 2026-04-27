@@ -1,0 +1,278 @@
+AS_05 - C++
+
+0.09375 seconds
+0.03125 seconds
+0.078125 seconds
+0.046875 seconds
+0.0625 seconds
+0.203125 seconds
+0.140625 seconds
+0.15625 seconds
+0.328125 seconds
+0.328125 seconds
+0.453125 seconds
+
+
+AS_05 - NetworkX
+
+0.125 seconds
+0.078125 seconds
+0.0625 seconds
+0.078125 seconds
+0.15625 seconds
+0.25 seconds
+0.203125 seconds
+0.265625 seconds
+0.21875 seconds
+0.375 seconds
+0.65625 seconds
+
+_________________________
+
+AS_06 - C++
+
+0.09375 seconds
+0.0625 seconds
+0.0625 seconds
+0.078125 seconds
+0.09375 seconds
+0.078125 seconds
+0.140625 seconds
+0.1875 seconds
+0.125 seconds
+0.328125 seconds
+0.28125 seconds
+
+
+AS_06 - NetworkX
+
+0.09375 seconds
+0.109375 seconds
+0.140625 seconds
+0.078125 seconds
+0.125 seconds
+0.15625 seconds
+0.15625 seconds
+0.390625 seconds
+0.390625 seconds
+0.34375 seconds
+0.453125 seconds
+
+
+_________________________
+
+AS_07 - C++
+
+0.0625 seconds
+0.046875 seconds
+0.09375 seconds
+0.0625 seconds
+0.09375 seconds
+0.0625 seconds
+0.1875 seconds
+0.109375 seconds
+0.328125 seconds
+0.46875 seconds
+
+
+As_07 - NetworkX
+
+0.0625 seconds
+0.046875 seconds
+0.078125 seconds
+0.046875 seconds
+0.015625 seconds
+0.078125 seconds
+0.1875 seconds
+0.171875 seconds
+0.46875 seconds
+1.03125 seconds
+
+_________________________
+
+MS_01 - C++
+
+0.03125 seconds
+0.09375 seconds
+0.078125 seconds
+0.109375 seconds
+0.109375 seconds
+0.0625 seconds
+
+
+MS_01 - NetworkX
+
+0.078125 seconds
+0.109375 seconds
+0.078125 seconds
+0.0625 seconds
+0.09375 seconds
+0.078125 seconds
+
+_________________________
+
+MS_02 - C++
+
+0.09375 seconds
+0.109375 seconds
+0.125 seconds
+0.15625 seconds
+0.234375 seconds
+0.15625 seconds
+
+
+MS_02 - NetworkX
+
+0.078125 seconds
+0.0625 seconds
+0.0625 seconds
+0.0625 seconds
+0.234375 seconds
+0.296875 seconds
+
+_________________________
+
+MS_03 - C++
+
+0.09375 seconds
+0.078125 seconds
+0.109375 seconds
+0.109375 seconds
+0.015625 seconds
+0.078125 seconds
+
+MS_03 - NetworkX
+
+0.0625 seconds
+0.109375 seconds
+0.15625 seconds
+0.1875 seconds
+0.203125 seconds
+0.3125 seconds
+
+_________________________
+
+S_04 - C++
+
+0.0 seconds
+0.09375 seconds
+0.03125 seconds
+0.109375 seconds
+0.0625 seconds
+0.09375 seconds
+
+
+S_04 - NetworkX
+
+0.0 seconds
+0.046875 seconds
+0.015625 seconds
+0.0625 seconds
+0.109375 seconds
+0.125 seconds
+
+_________________________
+
+S_05 - C++
+
+0.0 seconds
+0.0625 seconds
+0.09375 seconds
+0.078125 seconds
+0.09375 seconds
+0.109375 seconds
+
+
+S_05 - NetworkX
+
+0.0 seconds
+0.0625 seconds
+0.0625 seconds
+0.0625 seconds
+0.046875 seconds
+0.046875 seconds
+
+_________________________
+
+TF_02 - C++
+
+0.09375 seconds
+0.140625 seconds
+0.21875 seconds
+0.171875 seconds
+0.21875 seconds
+0.203125 seconds
+
+
+TF_02 - NetworkX
+
+0.078125 seconds
+0.125 seconds
+0.1875 seconds
+0.1875 seconds
+0.140625 seconds
+0.28125 seconds
+
+_________________________
+
+T_05 - C++
+
+0.09375 seconds
+0.09375 seconds
+0.09375 seconds
+0.09375 seconds
+0.03125 seconds
+0.109375 seconds
+0.09375 seconds
+0.171875 seconds
+0.1875 seconds
+0.21875 seconds
+0.1875 seconds
+
+
+T_05 - NetworkX
+
+0.0625 seconds
+0.046875 seconds
+0.109375 seconds
+0.15625 seconds
+0.09375 seconds
+0.1875 seconds
+0.15625 seconds
+0.1875 seconds
+0.203125 seconds
+0.234375 seconds
+0.21875 seconds
+
+_________________________
+
+T_06 - C++
+
+0.15625 seconds
+0.046875 seconds
+0.078125 seconds
+0.078125 seconds
+0.0625 seconds
+0.140625 seconds
+0.15625 seconds
+0.25 seconds
+0.234375 seconds
+0.28125 seconds
+0.21875 seconds
+
+
+T_06 - NetworkX
+
+0.125 seconds
+0.125 seconds
+0.140625 seconds
+0.171875 seconds
+0.1875 seconds
+0.296875 seconds
+0.3125 seconds
+0.328125 seconds
+0.25 seconds
+0.328125 seconds
+0.484375 seconds
+
+_________________________
