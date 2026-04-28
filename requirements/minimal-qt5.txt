@@ -1,0 +1,11 @@
+imagecodecs
+matplotlib
+networkx
+numpy
+opencv-python
+pandas
+PyQt5
+scikit-image
+scipy
+seaborn
+tifffile
