@@ -325,9 +325,15 @@ class ProcessingWorker(QThread):
                 old_mask = None
             
             # Calcul de l'enveloppe convexe
-            hull_mask = (convex_hull_image(binary_image > 0) * 255).astype(np.uint8)
-            convex_area = np.sum(hull_mask == 255)
-            pixel_count = np.sum(binary_image > 127)
+            mask_bool = binary_image > 0
+            pixel_count = int(np.sum(mask_bool))
+            
+            if pixel_count == 0:
+                hull_mask = np.zeros_like(binary_image, dtype=np.uint8)
+                convex_area = 0
+            else:
+                hull_mask = (convex_hull_image(mask_bool) * 255).astype(np.uint8)
+                convex_area = int(np.sum(hull_mask == 255))
             
             # Sauvegarder les données
             data_dict["Dataset"].append(dataset_name)
@@ -380,7 +386,10 @@ class ProcessingWorker(QThread):
             if image.ndim > 2:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            skeleton_image = np.array(skeletonize(image), dtype='uint8') * 255
+            mask_bool = image > 0
+            
+            skeleton_image = skeletonize(mask_bool)
+            skeleton_image = (skeleton_image.astype('uint8') * 255)
             
             output_name = replace_file_extension(image_name, new_extension='png')
             output_path = os.path.join(dataset_info.skeletonized_directory[analysis_type], output_name)
