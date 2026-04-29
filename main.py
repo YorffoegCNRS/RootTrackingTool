@@ -998,6 +998,7 @@ class App(QWidget):
         self.pixels_per_cm_spin.setRange(0.0, 10000.0)
         self.pixels_per_cm_spin.setValue(0.0)
         self.pixels_per_cm_spin.setDecimals(3)
+        self.pixels_per_cm_spin.valueChanged.connect(self.refreshCurrentGraphIfNeeded)
         pixels_per_cm_layout.addWidget(self.pixels_per_cm_spin)
         layout.addLayout(pixels_per_cm_layout)
         
