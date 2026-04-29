@@ -849,6 +849,9 @@ class App(QWidget):
         self.base_input_directory = None
         self.base_output_directory = None
         self.analysis_dict = {}
+        # Unité d'affichage des graphes de segmentation :
+        # "cm" convertit les aires en cm² si pixels_per_cm > 0, sinon fallback px.
+        self.graph_unit_mode = "cm"
         
         # Répertoires
         self.icons_directory = os.path.join(self.current_directory, "icons")
