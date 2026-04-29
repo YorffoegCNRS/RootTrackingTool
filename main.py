@@ -315,11 +315,15 @@ class ProcessingWorker(QThread):
                 )
                 binary_image = (binary_image * 255).astype('uint8')
             
-            # On garde les pixels de l'ancien masque
-            if i > 0:
-                binary_image = (np.logical_or(binary_image, old_mask) * 255).astype('uint8')
+            # Fusion temporelle seulement si demandée
+            if params.get('fusion_masks', False) and old_mask is not None:
+                binary_image = (np.logical_or(binary_image > 0, old_mask > 0) * 255).astype('uint8')
             
-            old_mask = binary_image.copy()
+            if params.get('fusion_masks', False):
+                old_mask = binary_image.copy()
+            else:
+                old_mask = None
+            
             # Calcul de l'enveloppe convexe
             hull_mask = (convex_hull_image(binary_image > 0) * 255).astype(np.uint8)
             convex_area = np.sum(hull_mask == 255)
@@ -577,11 +581,16 @@ class ImageDisplayWidget(QLabel):
         
         # Convertir numpy array vers QPixmap
         height, width = image_array.shape[:2]
+        channel = 1
+        if image_array.ndim == 3:
+            channel = image_array.shape[2]
+
+        bytes_per_line = channel * width
         if len(image_array.shape) == 3:
-            bytes_per_line = 3 * width
             q_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
+        elif channel == 4:
+            q_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888 if PYQT_VERSION == 6 else QImage.Format_RGBA8888)
         else:
-            bytes_per_line = width
             q_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8 if PYQT_VERSION == 6 else QImage.Format_Grayscale8)
         
         pixmap = QPixmap.fromImage(q_image)
@@ -1642,9 +1651,19 @@ class App(QWidget):
         self.current_image_array = image_read(image_path)
         
         # Convertir en QPixmap
-        height, width, channel = self.current_image_array.shape
-        bytes_per_line = 3 * width
-        q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
+        height, width = self.current_image_array.shape[:2]
+        channel = 1
+        if self.current_image_array.ndim == 3:
+            channel = self.current_image_array.shape[2]
+        
+        bytes_per_line = channel * width
+        if channel == 3:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888 if PYQT_VERSION == 6 else QImage.Format_RGB888)
+        elif channel == 4:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888 if PYQT_VERSION == 6 else QImage.Format_RGBA8888)
+        else:
+            q_image = QImage(self.current_image_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8 if PYQT_VERSION == 6 else QImage.Format_Grayscale8)
+        
         pixmap = QPixmap.fromImage(q_image)
         
         # Afficher dans l'onglet original
