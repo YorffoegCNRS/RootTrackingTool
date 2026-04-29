@@ -311,15 +311,25 @@ class ProcessingWorker(QThread):
                 )
                 binary_image = (binary_image * 255).astype('uint8')
             
-            # On garde les pixels de l'ancien masque
-            if i > 0:
-                binary_image = (np.logical_or(binary_image, old_mask) * 255).astype('uint8')
+            # Fusion temporelle seulement si demandée
+            if params.get('fusion_masks', False) and old_mask is not None:
+                binary_image = (np.logical_or(binary_image > 0, old_mask > 0) * 255).astype('uint8')
             
-            old_mask = binary_image.copy()
+            if params.get('fusion_masks', False):
+                old_mask = binary_image.copy()
+            else:
+                old_mask = None
+            
             # Calcul de l'enveloppe convexe
-            hull_mask = (convex_hull_image(binary_image > 0) * 255).astype(np.uint8)
-            convex_area = np.sum(hull_mask == 255)
-            pixel_count = np.sum(binary_image > 127)
+            mask_bool = binary_image > 0
+            pixel_count = int(np.sum(mask_bool))
+            
+            if pixel_count == 0:
+                hull_mask = np.zeros_like(binary_image, dtype=np.uint8)
+                convex_area = 0
+            else:
+                hull_mask = (convex_hull_image(mask_bool) * 255).astype(np.uint8)
+                convex_area = int(np.sum(hull_mask == 255))
             
             # Sauvegarder les données
             data_dict["Dataset"].append(dataset_name)
@@ -372,7 +382,13 @@ class ProcessingWorker(QThread):
             if image.ndim > 2:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            skeleton_image = np.array(skeletonize(image), dtype='uint8') * 255
+            # Sécurise le masque : accepte 0/255, 0/1, ou valeurs intermédiaires éventuelles
+            mask_bool = image > 0
+            
+            if not np.any(mask_bool):
+                skeleton_image = np.zeros_like(image, dtype=np.uint8)
+            else:
+                skeleton_image = (skeletonize(mask_bool).astype(np.uint8) * 255)
             
             output_name = replace_file_extension(image_name, new_extension='png')
             output_path = os.path.join(dataset_info.skeletonized_directory[analysis_type], output_name)
@@ -401,7 +417,7 @@ class ProgressWindow(QDialog):
         
         # Titre
         self.title_label = QLabel("Processing datasets...")
-        self.title_label.setFont(QFont("Arial", 12, QFontWeight.Bold))
+        self.title_label.setFont(QFont("Arial", 12, FontWeight.Bold))
         self.title_label.setAlignment(QtCompat.AlignCenter)
         layout.addWidget(self.title_label)
         
@@ -818,7 +834,8 @@ class App(QWidget):
                                           'min_object_size': 0,
                                           'line_thickness': 5,
                                           'temporal_merge': True,
-                                          'connect_objects': True
+                                          'connect_objects': True,
+                                          'pixels_per_cm': 0.0
                                         }
         
         # Gestion des datasets multiples
@@ -970,6 +987,25 @@ class App(QWidget):
         datasets_layout.addWidget(self.selectedCountLabel)
         
         layout.addLayout(datasets_layout)
+        
+        # Pixels par cm
+        pixels_per_cm_layout = QHBoxLayout()
+        pixels_per_cm_layout.addWidget(QLabel("Pixels/cm"))
+        self.pixels_per_cm_spin = QDoubleSpinBox()
+        self.pixels_per_cm_spin.setRange(0.0, 10000.0)
+        self.pixels_per_cm_spin.setValue(0.0)
+        self.pixels_per_cm_spin.setDecimals(3)
+        pixels_per_cm_layout.addWidget(self.pixels_per_cm_spin)
+        layout.addLayout(pixels_per_cm_layout)
+        
+        graph_unit_layout = QHBoxLayout()
+        graph_unit_layout.addWidget(QLabel("Graph unit"))
+        self.graph_unit_combo = QComboBox()
+        self.graph_unit_combo.addItems(["cm² if scale available", "pixels"])
+        self.graph_unit_combo.setCurrentIndex(0)
+        self.graph_unit_combo.currentIndexChanged.connect(self.refreshCurrentGraphIfNeeded)
+        graph_unit_layout.addWidget(self.graph_unit_combo)
+        layout.addLayout(graph_unit_layout)
         
         # Séparateur
         separator1 = QFrame()
@@ -1456,6 +1492,41 @@ class App(QWidget):
             elif self.current_analysis_type in self.analysis_configs:
                 current_widget.setSelectionCoordsRatio(self.analysis_configs[self.current_analysis_type].selection_coords_ratio)
     
+    def _graph_area_unit_settings(self):
+        """Return (use_cm2, scale_factor, unit_label) for segmentation graphs.
+        Pixel count and convex hull area are both areas, so conversion is px² -> cm².
+        """
+        pixels_per_cm = 0.0
+        try:
+            pixels_per_cm = float(self.pixels_per_cm_spin.value())
+        except Exception:
+            pixels_per_cm = 0.0
+        
+        unit_mode = "cm"
+        try:
+            if hasattr(self, "graph_unit_combo") and self.graph_unit_combo.currentIndex() == 1:
+                unit_mode = "px"
+        except Exception:
+            unit_mode = getattr(self, "graph_unit_mode", "cm")
+        
+        use_cm2 = (unit_mode == "cm") and (pixels_per_cm > 0.0)
+        if use_cm2:
+            return True, 1.0 / (pixels_per_cm ** 2), "cm²"
+        return False, 1.0, "px²"
+    
+    def refreshCurrentGraphIfNeeded(self):
+        """Redraw the visible graph tab when the graph unit or scale changes."""
+        try:
+            if not hasattr(self, "tabWidget"):
+                return
+            idx = self.tabWidget.currentIndex()
+            if idx == 3:
+                self.createSpecificGraph("roots")
+            elif idx == 4:
+                self.createSpecificGraph("leaves")
+        except Exception as e:
+            print(f"Could not refresh graph after unit change: {e}")
+    
     def createSpecificGraph(self, analysis_type):
         """Crée un graphique spécifique avec seaborn pour un rendu moderne"""
         if not self.current_dataset or not hasattr(self, 'analysis_dict'):
@@ -1490,6 +1561,11 @@ class App(QWidget):
             df["Pixel count"] = pd.to_numeric(df["Pixel count"], errors="coerce")
             df["Convex area"] = pd.to_numeric(df["Convex area"], errors="coerce")
             
+            # Conversion optionnelle des aires px² -> cm² pour l'affichage des graphes
+            use_cm2, area_factor, area_unit = self._graph_area_unit_settings()
+            df["Pixel count graph"] = df["Pixel count"] * area_factor
+            df["Convex area graph"] = df["Convex area"] * area_factor
+            
             # Supprimer les lignes avec des valeurs manquantes
             df = df.dropna(subset=["Day", "Pixel count", "Convex area"])
             
@@ -1505,7 +1581,7 @@ class App(QWidget):
                 # Graphique 1: Pixel Count avec seaborn
                 sns.lineplot(data=df, 
                             x='Day', 
-                            y='Pixel count', 
+                            y='Pixel count graph', 
                             hue='Modality',
                             marker='o',
                             markersize=8,
@@ -1515,7 +1591,7 @@ class App(QWidget):
                 
                 # Ajouter des barres d'erreur manuellement
                 for i, modality in enumerate(df['Modality'].unique()):
-                    subset = df[df['Modality'] == modality].groupby('Day')['Pixel count'].agg(['mean', 'std', 'count']).reset_index()
+                    subset = df[df['Modality'] == modality].groupby('Day')['Pixel count graph'].agg(['mean', 'std', 'count']).reset_index()
                     subset['se'] = subset['std'] / np.sqrt(subset['count'])
                     subset['se'] = subset['se'].fillna(0)
                     
@@ -1530,7 +1606,7 @@ class App(QWidget):
                 # Graphique 2: Convex Area avec seaborn
                 sns.lineplot(data=df, 
                             x='Day', 
-                            y='Convex area', 
+                            y='Convex area graph', 
                             hue='Modality',
                             marker='s',
                             markersize=8,
@@ -1540,7 +1616,7 @@ class App(QWidget):
                 
                 # Ajouter des barres d'erreur
                 for i, modality in enumerate(df['Modality'].unique()):
-                    subset = df[df['Modality'] == modality].groupby('Day')['Convex area'].agg(['mean', 'std', 'count']).reset_index()
+                    subset = df[df['Modality'] == modality].groupby('Day')['Convex area graph'].agg(['mean', 'std', 'count']).reset_index()
                     subset['se'] = subset['std'] / np.sqrt(subset['count'])
                     subset['se'] = subset['se'].fillna(0)
                     
@@ -1553,16 +1629,16 @@ class App(QWidget):
                                 alpha=0.7)
                 
                 # Configuration des graphiques avec style moderne
-                ax1.set_title(f'{analysis_type.title()} Analysis - Pixel Count Evolution\nDataset: {dataset_name}', 
+                ax1.set_title(f'{analysis_type.title()} Analysis - Segmented Area Evolution ({area_unit})\nDataset: {dataset_name}', 
                              fontsize=14, fontweight='bold', pad=20)
                 ax1.set_xlabel('Day', fontsize=12, fontweight='semibold')
-                ax1.set_ylabel('Pixel Count', fontsize=12, fontweight='semibold')
+                ax1.set_ylabel(f'Segmented area ({area_unit})', fontsize=12, fontweight='semibold')
                 ax1.legend(title='Modality', title_fontsize=11, fontsize=10, frameon=True, fancybox=True, shadow=True)
                 
-                ax2.set_title(f'{analysis_type.title()} Analysis - Convex Area Evolution', 
+                ax2.set_title(f'{analysis_type.title()} Analysis - Convex Hull Area Evolution ({area_unit})', 
                              fontsize=14, fontweight='bold', pad=20)
                 ax2.set_xlabel('Day', fontsize=12, fontweight='semibold')
-                ax2.set_ylabel('Convex Area', fontsize=12, fontweight='semibold')
+                ax2.set_ylabel(f'Convex hull area ({area_unit})', fontsize=12, fontweight='semibold')
                 ax2.legend(title='Modality', title_fontsize=11, fontsize=10, frameon=True, fancybox=True, shadow=True)
                 
                 # Améliorer l'apparence avec seaborn
@@ -1580,12 +1656,12 @@ class App(QWidget):
                             mod_data = df[df['Modality'] == modality].sort_values('Day')
                             if len(mod_data) > 2:
                                 # Régression polynomiale légère pour la tendance
-                                z1 = np.polyfit(mod_data['Day'], mod_data['Pixel count'], min(2, len(mod_data)-1))
+                                z1 = np.polyfit(mod_data['Day'], mod_data['Pixel count graph'], min(2, len(mod_data)-1))
                                 p1 = np.poly1d(z1)
                                 x_smooth = np.linspace(mod_data['Day'].min(), mod_data['Day'].max(), 100)
                                 ax1.plot(x_smooth, p1(x_smooth), '--', alpha=0.5, color=colors[i], linewidth=2)
                                 
-                                z2 = np.polyfit(mod_data['Day'], mod_data['Convex area'], min(2, len(mod_data)-1))
+                                z2 = np.polyfit(mod_data['Day'], mod_data['Convex area graph'], min(2, len(mod_data)-1))
                                 p2 = np.poly1d(z2)
                                 ax2.plot(x_smooth, p2(x_smooth), '--', alpha=0.5, color=colors[i], linewidth=2)
                     except:
@@ -1951,7 +2027,8 @@ class App(QWidget):
         self.cleaning_mask_parameters['min_object_size'] = params['min_object_size']
         self.cleaning_mask_parameters['line_thickness'] = 5
         self.cleaning_mask_parameters['temporal_merge'] = params['fusion_masks']
-        self.cleaning_mask_parameters['connect_objects'] = True
+        self.cleaning_mask_parameters['connect_objects'] = False
+        self.cleaning_mask_parameters['pixels_per_cm'] = self.pixels_per_cm_spin.value()
     
     def openRootArchitecture(self):
         """Ouverture de la fenêtre d'analyse racinaire"""
@@ -2070,15 +2147,15 @@ class App(QWidget):
         graphs_created = 0
         for analysis_type in ['roots', 'leaves']:
             current_res = self.analysis_dict.get(analysis_type, {}).get(dataset_name, None)
-            print(f"=== Analyse: {analysis_type} ===")
+            print(f"=== Analysis: {analysis_type} ===")
             print(f"Dataset: {dataset_name} (type: {type(dataset_name)})")
             print(f"current_res: {current_res}")
             if current_res and isinstance(current_res, dict):
-                print(f"Clés disponibles: {list(current_res.keys())}")
+                print(f"Available keys: {list(current_res.keys())}")
                 for key in ["Day", "Pixel count", "Modality", "Image name"]:
                     if key in current_res:
                         val = current_res[key]
-                        print(f"  {key}: {len(val) if hasattr(val, '__len__') else 'N/A'} éléments")
+                        print(f"  {key}: {len(val) if hasattr(val, '__len__') else 'N/A'} elements")
                         if hasattr(val, '__len__') and len(val) > 0:
                             print(f"    Échantillon: {val[:3] if len(val) >= 3 else val}")
                     else:
@@ -2089,28 +2166,31 @@ class App(QWidget):
                 data["Day"] = pd.to_numeric(current_res["Day"], errors="coerce")
                 data["Pixel count"] = pd.to_numeric(current_res["Pixel count"], errors="coerce")
                 data["Convex area"] = pd.to_numeric(current_res["Convex area"], errors="coerce")
+                use_cm2, area_factor, area_unit = self._graph_area_unit_settings()
+                data["Pixel count graph"] = data["Pixel count"] * area_factor
+                data["Convex area graph"] = data["Convex area"] * area_factor
                 
                 # Gérer la modalité - si elle n'existe pas, créer une modalité par défaut
                 if "Modality" in current_res and current_res["Modality"]:
                     data["Modality"] = current_res["Modality"]
-                    print(f"Modalités trouvées: {set(current_res['Modality'])}")
+                    print(f"Modalities found: {set(current_res['Modality'])}")
                 else:
-                    print(f"⚠ Pas de colonne Modality, création d'une modalité par défaut")
+                    print(f"⚠ No \'Modality\' column, create a default modality")
                     data["Modality"] = ["Default"] * len(data)
-                print(f"DataFrame créé: {data.shape}")
+                print(f"DataFrame created: {data.shape}")
                 data = data.dropna(subset=["Day", "Pixel count", "Convex area"])
-                print(f"Après nettoyage: {data.shape}")
+                print(f"After cleaning: {data.shape}")
                 
                 if len(data) == 0:
-                    print(f"⚠ Aucune donnée valide pour {analysis_type} après nettoyage")
+                    print(f"⚠ No valid data for {analysis_type} after cleaning")
                     continue
                 
                 # Calcul des moyennes et des erreurs standards
                 grouped = data.groupby(["Modality", "Day"]).agg(
-                    Mean=("Pixel count", "mean"),
-                    se=("Pixel count", lambda x: x.std() / (len(x) ** 0.5))
+                    Mean=("Pixel count graph", "mean"),
+                    se=("Pixel count graph", lambda x: x.std() / (len(x) ** 0.5))
                 ).reset_index()
-                print(f"✓ Groupement réussi: {len(grouped)} points, modalités: {grouped['Modality'].unique()}")
+                print(f"✓ Successful grouping: {len(grouped)} points, modalities: {grouped['Modality'].unique()}")
                 
                 # Initialiser le graphique
                 ax = self.figure.add_subplot(2, 1, idx)
@@ -2129,10 +2209,10 @@ class App(QWidget):
                     )
                 
                 # Configuration du graphique
-                ax.set_title(f"Cinétique de 'Pixel count' en fonction des jours", 
+                ax.set_title(f"Changes in the segmented area ({area_unit}) over time", 
                             fontsize=14, fontweight='bold', pad=20)
                 ax.set_xlabel("Day", fontsize=12, fontweight='bold')
-                ax.set_ylabel("Pixels", fontsize=12, fontweight='bold')
+                ax.set_ylabel(area_unit, fontsize=12, fontweight='bold')
                 # Améliorer la légende avec style Seaborn
                 legend = ax.legend(title="Modality", title_fontsize=11, fontsize=10, 
                                  loc='upper left', frameon=True, fancybox=True, shadow=True)
@@ -2149,18 +2229,18 @@ class App(QWidget):
                     spine.set_color('#cccccc')
                 
                 graphs_created += 1
-                print(f"✓ Graphique {analysis_type} créé avec succès")
+                print(f"✓ Graph {analysis_type} successfully created")
         
         # Affichage final après tous les graphiques
-        print(f"Nombre de graphiques créés: {graphs_created}")
+        print(f"Number of created graphs: {graphs_created}")
         if graphs_created > 0:
             self.figure.tight_layout(pad=2.0)
             self.canvas.draw()
-            print(f"=== FIN: {graphs_created} graphique(s) affiché(s) ===")
+            print(f"=== END: {graphs_created} displayed graphs ===")
         else:
             # Afficher un message si aucune donnée
             ax = self.figure.add_subplot(1, 1, 1)
-            ax.text(0.5, 0.5, f'Aucune donnée disponible\npour le dataset: {dataset_name}', 
+            ax.text(0.5, 0.5, f'No data available\nfor the dataset: {dataset_name}', 
                    ha='center', va='center', fontsize=14, 
                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
             ax.set_xlim(0, 1)
@@ -2168,7 +2248,7 @@ class App(QWidget):
             ax.set_xticks([])
             ax.set_yticks([])
             self.canvas.draw()
-            print("=== FIN: Aucune donnée - message d'information affiché ===")
+            print("=== END: No data - information message displayed ===")
     
     def applyColorThreshold(self, image, params):
         """Applique le seuillage RGB avec les paramètres donnés"""
@@ -2298,6 +2378,14 @@ class ApplicationWindow(QMainWindow):
         crop_leaves = QAction('Crop All Leaves', self)
         crop_leaves.triggered.connect(lambda: self.mainWidget.cropAllDatasets("leaves"))
         analysis_menu.addAction(crop_leaves)
+        
+        analysis_menu.addSeparator()
+        
+        # Edition manuelle des images
+        manual_edit_action = QAction('Manual Image Editor...', self)
+        manual_edit_action.setShortcut('Ctrl+E')
+        manual_edit_action.triggered.connect(self.mainWidget.open_manual_editor)
+        analysis_menu.addAction(manual_edit_action)
         
         analysis_menu.addSeparator()
         
