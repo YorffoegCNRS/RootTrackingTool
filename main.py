@@ -388,8 +388,10 @@ class ProcessingWorker(QThread):
             
             mask_bool = image > 0
             
-            skeleton_image = skeletonize(mask_bool)
-            skeleton_image = (skeleton_image.astype('uint8') * 255)
+            if not np.any(mask_bool):
+                skeleton_image = np.zeros_like(image, dtype=np.uint8)
+            else:
+                skeleton_image = (skeletonize(mask_bool).astype(np.uint8) * 255)
             
             output_name = replace_file_extension(image_name, new_extension='png')
             output_path = os.path.join(dataset_info.skeletonized_directory[analysis_type], output_name)
