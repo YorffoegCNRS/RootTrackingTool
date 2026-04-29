@@ -972,6 +972,16 @@ class App(QWidget):
         
         layout.addLayout(datasets_layout)
         
+        # Pixels par cm
+        pixels_per_cm_layout = QHBoxLayout()
+        pixels_per_cm_layout.addWidget(QLabel("Pixels/cm"))
+        self.pixels_per_cm_spin = QDoubleSpinBox()
+        self.pixels_per_cm_spin.setRange(0.0, 10000.0)
+        self.pixels_per_cm_spin.setValue(0.0)
+        self.pixels_per_cm_spin.setDecimals(3)
+        pixels_per_cm_layout.addWidget(self.pixels_per_cm_spin)
+        layout.addLayout(pixels_per_cm_layout)
+        
         # Séparateur
         separator1 = QFrame()
         separator1.setFrameShape(QFrame.Shape.HLine if PYQT_VERSION == 6 else QFrame.HLine)
@@ -1948,7 +1958,8 @@ class App(QWidget):
         self.cleaning_mask_parameters['min_object_size'] = params['min_object_size']
         self.cleaning_mask_parameters['line_thickness'] = 5
         self.cleaning_mask_parameters['temporal_merge'] = params['fusion_masks']
-        self.cleaning_mask_parameters['connect_objects'] = True
+        self.cleaning_mask_parameters['connect_objects'] = False
+        self.cleaning_mask_parameters['pixels_per_cm'] = self.pixels_per_cm_spin.value()
     
     def openRootArchitecture(self):
         """Ouverture de la fenêtre d'analyse racinaire"""
