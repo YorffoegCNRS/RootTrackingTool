@@ -1862,7 +1862,8 @@ class RootArchitectureWindow(QMainWindow):
                                   'connect_objects': True,
                                   'main_path_bias': 20,
                                   'grid_rows': 3,
-                                  'grid_cols': 2
+                                  'grid_cols': 2,
+                                  'pixels_per_cm': 0.0
                                 }
         self.init_params = init_params
         self.datasets = datasets
@@ -2131,7 +2132,7 @@ class RootArchitectureWindow(QMainWindow):
         pixels_per_cm_layout.addWidget(QLabel("Pixels/cm"))
         self.pixels_per_cm_spin = QDoubleSpinBox()
         self.pixels_per_cm_spin.setRange(0.0, 10000.0)
-        self.pixels_per_cm_spin.setValue(0.0)
+        self.pixels_per_cm_spin.setValue(self.init_params['pixels_per_cm'])
         self.pixels_per_cm_spin.setDecimals(3)
         pixels_per_cm_layout.addWidget(self.pixels_per_cm_spin)
         params_layout.addLayout(pixels_per_cm_layout)
