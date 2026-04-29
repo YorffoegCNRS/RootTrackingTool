@@ -2140,11 +2140,11 @@ class RootArchitectureWindow(QMainWindow):
         additional_layout = QHBoxLayout()
         checkbox_layout = QVBoxLayout()
         self.temporal_check = QCheckBox("Temporal fusion")
-        self.temporal_check.setChecked(True)
+        self.temporal_check.setChecked(bool(self.init_params.get('temporal_merge', False)))
         checkbox_layout.addWidget(self.temporal_check)
         
         self.connect_check = QCheckBox("Connect objects")
-        self.connect_check.setChecked(True)
+        self.connect_check.setChecked(bool(self.init_params.get('connect_objects', False)))
         checkbox_layout.addWidget(self.connect_check)
         
         grid_combobox_layout = QVBoxLayout()
