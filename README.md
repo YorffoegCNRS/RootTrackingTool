@@ -372,10 +372,10 @@ RTT/
 
 Technical details are available in the following files:
 
-- 📘 [Algorithm description](algorithm.md)
-- ⚙ [Parameters reference](parameters.md)
-- 📊 [Outputs description](outputs.md)
-- 📖 [User guide](user_guide.md)
+- 📘 [Algorithm description](docs/en/algorithm.md)
+- ⚙ [Parameters reference](docs/en/parameters.md)
+- 📊 [Outputs description](docs/en/outputs.md)
+- 📖 [User guide](docs/en/user_guide.md)
 
 
 ## Roadmap
