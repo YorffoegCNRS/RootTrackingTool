@@ -399,6 +399,7 @@ Technical details are available in the following files:
 - 📘 [Algorithm description](docs/en/algorithm.md)
 - ⚙ [Parameters reference](docs/en/parameters.md)
 - 📊 [Outputs description](docs/en/outputs.md)
+- 🗄️ [Dataset description](docs/en/dataset.md)
 - 📖 [User guide](docs/en/user_guide.md)
 
 
