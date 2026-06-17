@@ -386,6 +386,10 @@ It contains:
 
 These data make it possible to reproduce the analyses presented in the article and to benchmark root-tree analysis software using the same image sets.
 
+### Citation of the dataset
+
+If you use this dataset in your work, please cite the publication associated with RTT.
+
 
 ## Technical documentation
 
