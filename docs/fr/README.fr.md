@@ -24,6 +24,8 @@
     - [Structure du programme](#structure-du-programme)
     - [Structure attendue en entrée](#structure-attendue-en-entrée)
     - [Structure des données en sortie](#structure-des-données-en-sortie)
+  - [Jeu de données](#jeu-de-données)
+    - [Citation du jeu de données](#citation-du-jeu-de-données)
   - [Documentation technique](#documentation-technique)
   - [Roadmap](#roadmap)
     - [1. Outils de correction manuelle de segmentation](#1-outils-de-correction-manuelle-de-segmentation)
@@ -365,6 +367,28 @@ RTT/
 ├── widgets.py
 ├── window_analyzer.py
 ```
+
+## Jeu de données
+
+Le jeu de données associé à RTT est publiquement accessible à l'adresse suivante :
+
+https://doi.org/10.57745/SW015R
+
+
+Il contient :
+
+- Des scans bruts de laitue, maïs et tomate cultivés en rhizobox, acquis à différents stades de développement ;
+- Les images correspondantes prétraitées avec Ilastik ;
+- Des scans bruts et prétraités d'Arabidopsis thaliana cultivée en boîtes de Pétri ;
+- Un fichier Excel regroupant les mesures manuelles (ImageJ) et les mesures produites par les différents logiciels évalués dans l'étude, utilisées pour comparer RTT aux autres outils d'analyse racinaire.
+
+Ces données permettent de reproduire les analyses présentées dans l'article et de benchmarker des logiciels d'analyse d'architecture racinaire sur les mêmes jeux d'images.
+
+
+### Citation du jeu de données
+
+Si vous utilisez ce jeu de données dans vos travaux, merci de citer la publication associée à RTT.
+
 
 ## Documentation technique
 
