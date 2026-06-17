@@ -1,7 +1,7 @@
 # Root Tracking Tool : Readme
 
 * 🇫🇷 Version française
-* 🇬🇧 [English version](docs/en/README.md)
+* 🇬🇧 [English version](../en/README.md)
 
 
 ### Table des matières
