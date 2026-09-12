@@ -952,7 +952,11 @@ class RootArchitectureAnalyzer:
             result['secondary_roots_length_cm'] = result['secondary_roots_length'] / self.pixels_per_cm
             result['total_root_length_cm'] = result['total_root_length'] / self.pixels_per_cm
             result['exact_skeleton_length_cm'] = result['exact_skeleton_length'] / self.pixels_per_cm
-            result['total_area'] = result['exact_skeleton_length'] / (self.pixels_per_cm ** 2)
+            # 'total_area' reste l'aire du masque en px2 (calculee plus haut) ;
+            # la version en cm2 est ajoutee dans une colonne dediee.
+            # Auparavant 'total_area' etait ecrasee par la longueur du squelette
+            # divisee par pixels_per_cm**2, ce qui n'etait pas une aire.
+            result['total_area_cm'] = result['total_area'] / (self.pixels_per_cm ** 2)
             result['convex_hull_cm'] = result['convex_hull'] / (self.pixels_per_cm ** 2)
             result['convex_area_cm'] = result['convex_area'] / (self.pixels_per_cm ** 2)
         

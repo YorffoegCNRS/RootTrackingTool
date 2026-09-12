@@ -88,11 +88,18 @@ def ensure_rgb(image, path_hint=None):
     if image.ndim == 2:
         # grayscale -> 3-channel RGB for consistent display in threshold windows
         return np.stack([image, image, image], axis=-1)
+    is_tiff = bool(path_hint) and str(path_hint).lower().endswith(('.tif', '.tiff'))
+    if image.ndim == 3 and image.shape[2] == 4:
+        # RGBA (tifffile) ou BGRA (cv2) -> on supprime le canal alpha
+        try:
+            if is_tiff:
+                return image[:, :, :3]
+            return cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
+        except Exception:
+            return image[:, :, :3]
     if image.ndim == 3 and image.shape[2] == 3:
-        if path_hint:
-            p = str(path_hint).lower()
-            if p.endswith(('.tif', '.tiff')):
-                return image
+        if is_tiff:
+            return image
         try:
             return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         except Exception:
@@ -154,7 +161,7 @@ class ProcessingWorker(QThread):
                                 break
                             
                             image_path = os.path.join(dataset_info.path, image_name)
-                            image = image_read(image_path)
+                            image = ensure_rgb(image_read(image_path), image_path)
                             height, width = image.shape[:2]
                             
                             coords_ratio = config.selection_coords_ratio
@@ -213,18 +220,37 @@ class ProcessingWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
     
+    def _resolve_source_directory(self, dataset_info, analysis_type, directory_map):
+        """Retourne le dossier source a utiliser pour une etape de traitement.
+
+        Les dossiers de sortie sont crees a l'avance par createAllOutputDirectories(),
+        donc os.path.exists() ne suffit pas : un dossier peut exister tout en etant
+        vide (p. ex. le dossier Crop quand l'utilisateur a decoche le recadrage).
+        On ne retient donc le dossier intermediaire que s'il contient reellement
+        des images, sinon on retombe sur les images d'origine du dataset.
+        """
+        candidate = directory_map.get(analysis_type) if directory_map else None
+        if candidate and os.path.isdir(candidate):
+            try:
+                has_images = any(
+                    f.lower().endswith(self.parent_app.image_extension_list)
+                    for f in os.listdir(candidate)
+                )
+            except OSError:
+                has_images = False
+            if has_images:
+                return candidate
+        return dataset_info.path
+
     def _segment_dataset(self, dataset_name, dataset_info, analysis_type):
         """Segmente un dataset spécifique"""
         config = self.parent_app.analysis_configs[analysis_type]
         params = config.threshold_params
         
-        # Déterminer quelles images utiliser
-        if (analysis_type in dataset_info.crop_directory and 
-            dataset_info.crop_directory[analysis_type] and 
-            os.path.exists(dataset_info.crop_directory[analysis_type])):
-            source_directory = dataset_info.crop_directory[analysis_type]
-        else:
-            source_directory = dataset_info.path
+        # Déterminer quelles images utiliser : les images recadrées si le
+        # recadrage a bien produit des fichiers, sinon les images d'origine.
+        source_directory = self._resolve_source_directory(
+            dataset_info, analysis_type, dataset_info.crop_directory)
         
         data_dict = {
             "Dataset": [], "Image name": [], "Analysis type": [],
@@ -252,8 +278,12 @@ class ProcessingWorker(QThread):
                     if name_part[0].lower() in ['j', 'd']:
                         image_day = int(name_part[1:])
             
-            # Charger et traiter l'image
-            image = cv2.cvtColor(image_read(image_path), cv2.COLOR_BGR2RGB)
+            # Charger et traiter l'image.
+            # ensure_rgb() gere l'ordre des canaux selon le format (tifffile -> RGB,
+            # cv2.imread -> BGR) et supprime un eventuel canal alpha. Une conversion
+            # BGR2RGB inconditionnelle intervertirait R et B sur les TIFF, donc les
+            # classes Ilastik exportees dans ces canaux.
+            image = ensure_rgb(image_read(image_path), image_path)
             
             # Appliquer le seuillage RGB
             binary_image = self.parent_app.applyColorThreshold(image, params)
@@ -364,12 +394,8 @@ class ProcessingWorker(QThread):
         export_convex_area(output_csv_path, data_dict, csv_separator=';')
     
     def _skeletonize_dataset(self, dataset_name, dataset_info, analysis_type):
-        if (analysis_type in dataset_info.segmented_directory and 
-            dataset_info.segmented_directory[analysis_type] and 
-            os.path.exists(dataset_info.segmented_directory[analysis_type])):
-            source_directory = dataset_info.segmented_directory[analysis_type]
-        else:
-            source_directory = dataset_info.path
+        source_directory = self._resolve_source_directory(
+            dataset_info, analysis_type, dataset_info.segmented_directory)
         
         # Traiter chaque image
         image_list = [f for f in os.listdir(source_directory) 
